@@ -10,6 +10,9 @@
     "sourceMap": true,
     "outDir": "./dist",
     "baseUrl": "./",
+    "paths": {
+      "@prisma/client": ["node_modules/.prisma/client/index"]
+    },
     "incremental": true,
     "strict": true,
     "moduleResolution": "node",
