@@ -1,37 +1,56 @@
 import {
     IsArray,
+    IsEnum,
     IsInt,
+    IsOptional,
     IsString,
     Matches,
-    Max,
     Min,
     ValidateNested,
     ArrayMinSize,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { ScheduleType } from '@prisma/client';
 
-export class TimeSlotDto {
-    @IsString()
-    @Matches(/^([01]\d|2[0-3]):([0-5]\d)$/, {
-        message: 'startTime must be in HH:mm format (e.g. 13:00 for 1 PM)',
-    })
-    startTime!: string;
+export class AvailabilityConfigDto {
+    @IsEnum(ScheduleType)
+    scheduleType!: ScheduleType;
 
     @IsString()
     @Matches(/^([01]\d|2[0-3]):([0-5]\d)$/, {
-        message: 'endTime must be in HH:mm format (e.g. 14:00 for 2 PM)',
+        message: 'consultingStartTime must be in HH:mm format (e.g. 13:00 for 1 PM)',
     })
-    endTime!: string;
+    consultingStartTime!: string;
+
+    @IsString()
+    @Matches(/^([01]\d|2[0-3]):([0-5]\d)$/, {
+        message: 'consultingEndTime must be in HH:mm format (e.g. 14:00 for 2 PM)',
+    })
+    consultingEndTime!: string;
+
+    @IsInt()
+    @Min(1)
+    maxAppt!: number;
+
+    @IsOptional()
+    @IsString()
+    session?: string;
+
+    @IsOptional()
+    @IsInt()
+    @Min(1)
+    slotDuration?: number;
 }
 
+
 // Body for PUT /api/v1/doctors/availability/monday
-// { "slots": [{ "startTime": "13:00", "endTime": "14:00" }] }
+// { "availabilities": [{ "scheduleType": "STREAM", "consultingStartTime": "13:00", "consultingEndTime": "14:00", "maxAppt": 30 }] }
 export class SetDaySlotsDto {
     @IsArray()
     @ArrayMinSize(1)
     @ValidateNested({ each: true })
-    @Type(() => TimeSlotDto)
-    slots!: TimeSlotDto[];
+    @Type(() => AvailabilityConfigDto)
+    availabilities!: AvailabilityConfigDto[];
 }
 
 // Used inside SetWeekAvailabilityDto
@@ -42,12 +61,12 @@ export class DayScheduleDto {
     @IsArray()
     @ArrayMinSize(1)
     @ValidateNested({ each: true })
-    @Type(() => TimeSlotDto)
-    slots!: TimeSlotDto[];
+    @Type(() => AvailabilityConfigDto)
+    availabilities!: AvailabilityConfigDto[];
 }
 
 // Body for PUT /api/v1/doctors/availability
-// { "schedule": [{ "day": "monday", "slots": [...] }, { "day": "wednesday", "slots": [...] }] }
+// { "schedule": [{ "day": "monday", "availabilities": [...] }, { "day": "wednesday", "availabilities": [...] }] }
 export class SetWeekAvailabilityDto {
     @IsArray()
     @ArrayMinSize(1)

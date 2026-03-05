@@ -36,7 +36,7 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly emailService: EmailService,
-  ) {}
+  ) { }
 
   // Token Generator
 
@@ -301,6 +301,29 @@ export class AuthService {
       message: 'Doctor onboarding successful',
       user: this.sanitizeUser(user),
       tokens,
+    };
+  }
+
+
+
+
+
+  // Delete Account
+  async handleDeleteAccount(userId: string) {
+    const existingUser = await this.prisma.user.findUnique({
+      where: { id: userId },
+    });
+
+    if (!existingUser) {
+      throw new UnauthorizedException('User not found');
+    }
+
+    await this.prisma.user.delete({
+      where: { id: userId },
+    });
+
+    return {
+      message: 'Account deleted successfully',
     };
   }
 

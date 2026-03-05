@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -95,5 +96,10 @@ export class AuthController {
     this.setAuthCookies(res, result.tokens.accessToken, result.tokens.refreshToken);
     return result;
   }
-}
 
+  @Delete('delete/user')
+  @UseGuards(JwtAuthGuard)
+  async deleteAccount(@CurrentUser('userId') userId: string) {
+    return this.auth.handleDeleteAccount(userId);
+  }
+}

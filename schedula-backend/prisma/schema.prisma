@@ -37,6 +37,8 @@ model User {
   doctor             Doctor?
 }
 
+
+
 model Doctor {
   id             String         @id @default(uuid())
   userId         String         @unique
@@ -72,20 +74,44 @@ model Specialization {
   createdAt DateTime @default(now())
 }
 
+enum ScheduleType {
+  STREAM
+  WAVE
+}
+
 model Availability {
-  id        String   @id @default(uuid())
-  doctorId  String
-  doctor    Doctor   @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  id                  String   @id @default(uuid())
+  doctorId            String
+  doctor              Doctor   @relation(fields: [doctorId], references: [id], onDelete: Cascade)
   
   // Day of week (0=Sunday, 1=Monday, ... 6=Saturday)
-  dayOfWeek      Int
+  dayOfWeek           Int
   
-  // Time slots (e.g., "09:00" to "17:00")
+  scheduleType        ScheduleType @default(STREAM)
+
+  consultingStartTime String
+  consultingEndTime   String
+  maxAppt             Int
+  session             String?  // e.g. "Morning", "Evening"
+  slotDuration        Int?     // In minutes, only required for WAVE
+  
+  slots               AvailabilitySlot[]
+  
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model AvailabilitySlot {
+  id             String       @id @default(uuid())
+  availabilityId String
+  availability   Availability @relation(fields: [availabilityId], references: [id], onDelete: Cascade)
+  
   startTime      String
   endTime        String
+  maxAppt        Int          // Appointments allowed for this specific slot
   
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
 }
 
 model VerificationToken {

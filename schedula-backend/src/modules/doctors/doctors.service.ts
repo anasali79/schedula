@@ -9,7 +9,7 @@ import { CreateSpecializationDto } from './dto/create-specialization.dto';
 import {
   SetDaySlotsDto,
   SetWeekAvailabilityDto,
-  TimeSlotDto,
+  AvailabilityConfigDto,
 } from './dto/set-availability.dto';
 
 const DAY_NAMES = [
@@ -21,6 +21,7 @@ const DAY_NAMES = [
   'friday',
   'saturday',
 ];
+
 
 @Injectable()
 export class DoctorsService {
@@ -47,7 +48,7 @@ export class DoctorsService {
       include: {
         profile: true,
         specializations: true,
-        availabilities: true,
+
       },
     });
     if (!doctor) {
@@ -123,27 +124,63 @@ export class DoctorsService {
     return `${hour12}:${m.toString().padStart(2, '0')} ${period}`;
   }
 
-  private validateSlots(slots: TimeSlotDto[]) {
-    for (const slot of slots) {
-      const start = this.timeToMinutes(slot.startTime);
-      const end = this.timeToMinutes(slot.endTime);
+  private generateWaveSlots(startMinutes: number, endMinutes: number, duration: number, maxAppt: number) {
+    const slots: { startTime: string; endTime: string; maxAppt: number }[] = [];
+    let current = startMinutes;
+
+    while (current < endMinutes) {
+      const next = current + duration;
+      if (next > endMinutes) break; // Don't create partial slots
+
+      const stHour = Math.floor(current / 60).toString().padStart(2, '0');
+      const stMin = (current % 60).toString().padStart(2, '0');
+
+      const enHour = Math.floor(next / 60).toString().padStart(2, '0');
+      const enMin = (next % 60).toString().padStart(2, '0');
+
+      slots.push({
+        startTime: `${stHour}:${stMin}`,
+        endTime: `${enHour}:${enMin}`,
+        maxAppt
+      });
+
+      current = next;
+    }
+
+    return slots;
+  }
+
+  private validateAvailabilities(availabilities: AvailabilityConfigDto[]) {
+    for (const config of availabilities) {
+      const start = this.timeToMinutes(config.consultingStartTime);
+      const end = this.timeToMinutes(config.consultingEndTime);
       if (end <= start) {
         throw new BadRequestException(
-          `Invalid slot: endTime (${slot.endTime}) must be after startTime (${slot.startTime})`,
+          `Invalid availability: consultingEndTime (${config.consultingEndTime}) must be after consultingStartTime (${config.consultingStartTime})`,
         );
+      }
+
+      if (config.scheduleType === 'WAVE') {
+        if (!config.slotDuration) {
+          throw new BadRequestException('slotDuration is required for WAVE scheduling');
+        }
+        const diff = end - start;
+        if (diff % config.slotDuration !== 0) {
+          throw new BadRequestException(`slotDuration (${config.slotDuration} min) must perfectly divide the time range (${diff} min)`);
+        }
       }
     }
 
-    const sorted = [...slots].sort(
-      (a, b) => this.timeToMinutes(a.startTime) - this.timeToMinutes(b.startTime),
+    const sorted = [...availabilities].sort(
+      (a, b) => this.timeToMinutes(a.consultingStartTime) - this.timeToMinutes(b.consultingStartTime),
     );
 
     for (let i = 1; i < sorted.length; i++) {
-      const prevEnd = this.timeToMinutes(sorted[i - 1].endTime);
-      const currStart = this.timeToMinutes(sorted[i].startTime);
+      const prevEnd = this.timeToMinutes(sorted[i - 1].consultingEndTime);
+      const currStart = this.timeToMinutes(sorted[i].consultingStartTime);
       if (currStart < prevEnd) {
         throw new BadRequestException(
-          `Overlapping slots detected: ${sorted[i - 1].startTime}-${sorted[i - 1].endTime} overlaps with ${sorted[i].startTime}-${sorted[i].endTime}`,
+          `Overlapping availabilities detected: ${sorted[i - 1].consultingStartTime}-${sorted[i - 1].consultingEndTime} overlaps with ${sorted[i].consultingStartTime}-${sorted[i].consultingEndTime}`,
         );
       }
     }
@@ -154,41 +191,47 @@ export class DoctorsService {
     const doctor = await this.getDoctorByUserId(userId);
     const dayOfWeek = this.dayNameToNumber(day);
 
-    this.validateSlots(dto.slots);
+    this.validateAvailabilities(dto.availabilities);
 
-    await this.prisma.$transaction([
-      this.prisma.availability.deleteMany({
-        where: {
-          doctorId: doctor.id,
-          dayOfWeek,
-        },
-      }),
-      ...dto.slots.map((slot) =>
-        this.prisma.availability.create({
+    let isUpdate = false;
+
+    // Using transaction for safe delete+recreate cascade
+    await this.prisma.$transaction(async (tx) => {
+      const deleted = await tx.availability.deleteMany({
+        where: { doctorId: doctor.id, dayOfWeek },
+      });
+      if (deleted.count > 0) isUpdate = true;
+
+      for (const config of dto.availabilities) {
+        const generatedSlots = config.scheduleType === 'WAVE'
+          ? this.generateWaveSlots(
+            this.timeToMinutes(config.consultingStartTime),
+            this.timeToMinutes(config.consultingEndTime),
+            config.slotDuration!,
+            config.maxAppt
+          )
+          : [];
+
+        await tx.availability.create({
           data: {
             doctorId: doctor.id,
             dayOfWeek,
-            startTime: slot.startTime,
-            endTime: slot.endTime,
+            scheduleType: config.scheduleType,
+            consultingStartTime: config.consultingStartTime,
+            consultingEndTime: config.consultingEndTime,
+            maxAppt: config.maxAppt,
+            session: config.session || null,
+            slotDuration: config.slotDuration || null,
+            slots: generatedSlots.length > 0 ? { create: generatedSlots } : undefined,
           },
-        }),
-      ),
-    ]);
-
-    const updated = await this.prisma.availability.findMany({
-      where: { doctorId: doctor.id, dayOfWeek },
-      orderBy: { startTime: 'asc' },
+        });
+      }
     });
 
+    const scheduleData = await this.getMyAvailability(userId);
     return {
-      message: `Availability set for ${this.capitalize(day)}`,
-      day: this.capitalize(day),
-      slots: updated.map((a) => ({
-        id: a.id,
-        startTime: a.startTime,
-        endTime: a.endTime,
-        display: `${this.to12Hour(a.startTime)} to ${this.to12Hour(a.endTime)}`,
-      })),
+      message: `Availability ${isUpdate ? 'updated' : 'created'} successfully for ${this.capitalize(day)}`,
+      ...scheduleData
     };
   }
 
@@ -198,33 +241,56 @@ export class DoctorsService {
 
     for (const daySchedule of dto.schedule) {
       this.dayNameToNumber(daySchedule.day); // validate day name
-      this.validateSlots(daySchedule.slots);
+      this.validateAvailabilities(daySchedule.availabilities);
     }
 
     const daysToUpdate = dto.schedule.map((d) => this.dayNameToNumber(d.day));
 
-    await this.prisma.$transaction([
-      this.prisma.availability.deleteMany({
+    let isUpdate = false;
+
+    await this.prisma.$transaction(async (tx) => {
+      const deleted = await tx.availability.deleteMany({
         where: {
           doctorId: doctor.id,
           dayOfWeek: { in: daysToUpdate },
         },
-      }),
-      ...dto.schedule.flatMap((daySchedule) =>
-        daySchedule.slots.map((slot) =>
-          this.prisma.availability.create({
+      });
+      if (deleted.count > 0) isUpdate = true;
+
+      for (const daySchedule of dto.schedule) {
+        const dayOfWeek = this.dayNameToNumber(daySchedule.day);
+        for (const config of daySchedule.availabilities) {
+          const generatedSlots = config.scheduleType === 'WAVE'
+            ? this.generateWaveSlots(
+              this.timeToMinutes(config.consultingStartTime),
+              this.timeToMinutes(config.consultingEndTime),
+              config.slotDuration!,
+              config.maxAppt
+            )
+            : [];
+
+          await tx.availability.create({
             data: {
               doctorId: doctor.id,
-              dayOfWeek: this.dayNameToNumber(daySchedule.day),
-              startTime: slot.startTime,
-              endTime: slot.endTime,
+              dayOfWeek,
+              scheduleType: config.scheduleType,
+              consultingStartTime: config.consultingStartTime,
+              consultingEndTime: config.consultingEndTime,
+              maxAppt: config.maxAppt,
+              session: config.session || null,
+              slotDuration: config.slotDuration || null,
+              slots: generatedSlots.length > 0 ? { create: generatedSlots } : undefined,
             },
-          }),
-        ),
-      ),
-    ]);
+          });
+        }
+      }
+    });
 
-    return this.getMyAvailability(userId);
+    const scheduleData = await this.getMyAvailability(userId);
+    return {
+      message: `Weekly availability ${isUpdate ? 'updated' : 'created'} successfully`,
+      ...scheduleData
+    };
   }
 
   // DELETE /api/v1/doctors/availability/monday
@@ -240,7 +306,7 @@ export class DoctorsService {
     });
 
     return {
-      message: `All availability removed for ${this.capitalize(day)}`,
+      message: `Availability deleted successfully for ${this.capitalize(day)}`,
     };
   }
 
@@ -248,19 +314,27 @@ export class DoctorsService {
   async deleteSlot(userId: string, slotId: string) {
     const doctor = await this.getDoctorByUserId(userId);
 
-    const slot = await this.prisma.availability.findFirst({
+    // Try finding Availability block (STREAM or Entire Block)
+    const block = await this.prisma.availability.findFirst({
       where: { id: slotId, doctorId: doctor.id },
     });
 
-    if (!slot) {
-      throw new NotFoundException('Availability slot not found');
+    if (block) {
+      await this.prisma.availability.delete({ where: { id: slotId } });
+      return { message: `Availability block deleted successfully` };
     }
 
-    await this.prisma.availability.delete({ where: { id: slotId } });
+    // Try finding AvailabilitySlot (Generated for WAVE scheduling)
+    const generatedSlot = await this.prisma.availabilitySlot.findFirst({
+      where: { id: slotId, availability: { doctorId: doctor.id } },
+    });
 
-    return {
-      message: `Slot ${this.to12Hour(slot.startTime)} to ${this.to12Hour(slot.endTime)} on ${this.capitalize(DAY_NAMES[slot.dayOfWeek])} removed`,
-    };
+    if (generatedSlot) {
+      await this.prisma.availabilitySlot.delete({ where: { id: slotId } });
+      return { message: `Availability slot deleted successfully` };
+    }
+
+    throw new NotFoundException('Availability slot or block not found');
   }
 
   // GET /api/v1/doctors/availability
@@ -269,24 +343,41 @@ export class DoctorsService {
 
     const availabilities = await this.prisma.availability.findMany({
       where: { doctorId: doctor.id },
-      orderBy: [{ dayOfWeek: 'asc' }, { startTime: 'asc' }],
+      include: { slots: true },
+      orderBy: [{ dayOfWeek: 'asc' }, { consultingStartTime: 'asc' }],
     });
 
     const weekSchedule = DAY_NAMES.map((dayName, index) => {
-      const daySlots = availabilities.filter((a) => a.dayOfWeek === index);
+      const dayAvailabilities = availabilities.filter((a) => a.dayOfWeek === index);
       return {
         day: this.capitalize(dayName),
         dayOfWeek: index,
-        isAvailable: daySlots.length > 0,
-        slots: daySlots.map((a) => ({
+        isAvailable: dayAvailabilities.length > 0,
+        availabilities: dayAvailabilities.map((a) => ({
           id: a.id,
-          startTime: a.startTime,
-          endTime: a.endTime,
-          display: `${this.to12Hour(a.startTime)} to ${this.to12Hour(a.endTime)}`,
+          scheduleType: a.scheduleType,
+          consultingStartTime: a.consultingStartTime,
+          consultingEndTime: a.consultingEndTime,
+          maxAppt: a.maxAppt,
+          session: a.session,
+          slotDuration: a.slotDuration,
+          display: `${this.to12Hour(a.consultingStartTime)} to ${this.to12Hour(a.consultingEndTime)}`,
+          ...(a.scheduleType === 'WAVE' ? {
+            generatedSlots: a.slots.map(s => ({
+              id: s.id,
+              startTime: s.startTime,
+              endTime: s.endTime,
+              maxAppt: s.maxAppt,
+              display: `${this.to12Hour(s.startTime)} to ${this.to12Hour(s.endTime)}`
+            })).sort((s1, s2) => this.timeToMinutes(s1.startTime) - this.timeToMinutes(s2.startTime))
+          } : {})
         })),
       };
     });
 
-    return { schedule: weekSchedule };
+    return {
+      message: 'Availability fetched successfully',
+      schedule: weekSchedule
+    };
   }
 }
