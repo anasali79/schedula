@@ -10,4 +10,7 @@ import { PatientsModule } from './modules/patients/patients.module';
   controllers: [],
   providers: [],
 })
-export class AppModule { }
+export class AppModule {}
+
+
+
