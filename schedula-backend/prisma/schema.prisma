@@ -75,7 +75,6 @@ model Profile {
   bio               String?
   experienceYears   Int?
   consultationFee   Decimal? @db.Decimal(10, 2)
-  consultationHours Json? // e.g. {"monday": ["09:00-17:00"], "tuesday": ["09:00-12:00"]}
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 }
@@ -98,16 +97,25 @@ model Availability {
   doctorId String
   doctor   Doctor @relation(fields: [doctorId], references: [id], onDelete: Cascade)
 
-  // Day of week (0=Sunday, 1=Monday, ... 6=Saturday)
-  dayOfWeek Int
+  // Day of week (0=Sunday, 1=Monday, ... 6=Saturday) - for Recurring
+  dayOfWeek Int?
+
+  // Specific date - for Custom availability
+  date      DateTime?
 
   scheduleType ScheduleType @default(STREAM)
 
   consultingStartTime String
   consultingEndTime   String
-  maxAppt             Int
+  maxAppt             Int     @default(0)
   session             String? // e.g. "Morning", "Evening"
-  slotDuration        Int? // In minutes, only required for WAVE
+
+  // WAVE mode fields
+  slotDuration Int? // In minutes
+
+  // STREAM mode fields
+  streamInterval  Int? // In minutes
+  streamBatchSize Int? // Patients per batch/stream
 
   slots AvailabilitySlot[]
 

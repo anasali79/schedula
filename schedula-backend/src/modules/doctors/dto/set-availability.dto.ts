@@ -28,9 +28,10 @@ export class AvailabilityConfigDto {
     })
     consultingEndTime!: string;
 
+    @IsOptional()
     @IsInt()
     @Min(1)
-    maxAppt!: number;
+    maxAppt?: number; // Capacity per Slot for WAVE, Capacity for STREAM block.
 
     @IsOptional()
     @IsString()
@@ -39,7 +40,17 @@ export class AvailabilityConfigDto {
     @IsOptional()
     @IsInt()
     @Min(1)
-    slotDuration?: number;
+    slotDuration?: number; // Only for WAVE
+
+    @IsOptional()
+    @IsInt()
+    @Min(1)
+    streamInterval?: number; // Only for STREAM
+
+    @IsOptional()
+    @IsInt()
+    @Min(1)
+    streamBatchSize?: number; // Only for STREAM
 }
 
 
@@ -74,3 +85,15 @@ export class SetWeekAvailabilityDto {
     @Type(() => DayScheduleDto)
     schedule!: DayScheduleDto[];
 }
+
+// Body for POST /api/v1/doctors/custom-availability/:date
+// { "availabilities": [...] }
+export class SetCustomAvailabilityDto {
+    @IsArray()
+    @ArrayMinSize(1)
+    @ValidateNested({ each: true })
+    @Type(() => AvailabilityConfigDto)
+    availabilities!: AvailabilityConfigDto[];
+}
+
+
