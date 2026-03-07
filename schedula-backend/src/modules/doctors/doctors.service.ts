@@ -241,7 +241,7 @@ export class DoctorsService {
             : [{ startTime: config.consultingStartTime, endTime: config.consultingEndTime, maxAppt: config.maxAppt! }];
 
         const totalMaxAppt = isWave
-          ? units.reduce((sum: number, u: any) => sum + u.maxAppt, 0)
+          ? config.maxAppt!
           : config.streamInterval
             ? units.reduce((sum: number, u: any) => sum + u.maxAppt, 0)
             : config.maxAppt!;
@@ -307,7 +307,7 @@ export class DoctorsService {
               : [{ startTime: config.consultingStartTime, endTime: config.consultingEndTime, maxAppt: config.maxAppt! }];
 
           const totalMaxAppt = isWave
-            ? units.reduce((sum: number, u: any) => sum + u.maxAppt, 0)
+            ? config.maxAppt!
             : config.streamInterval
               ? units.reduce((sum: number, u: any) => sum + u.maxAppt, 0)
               : config.maxAppt!;
@@ -391,7 +391,7 @@ export class DoctorsService {
             : [{ startTime: config.consultingStartTime, endTime: config.consultingEndTime, maxAppt: config.maxAppt! }];
 
         const totalMaxAppt = isWave
-          ? units.reduce((sum: number, u: any) => sum + u.maxAppt, 0)
+          ? config.maxAppt!
           : config.streamInterval
             ? units.reduce((sum: number, u: any) => sum + u.maxAppt, 0)
             : config.maxAppt!;
