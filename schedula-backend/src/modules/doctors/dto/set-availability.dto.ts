@@ -12,6 +12,54 @@ import {
 import { Type } from 'class-transformer';
 import { ScheduleType } from '@prisma/client';
 
+export class WaveSlotDto {
+    @IsString()
+    @Matches(/^([01]\d|2[0-3]):([0-5]\d)$/, {
+        message: 'startTime must be in HH:mm format',
+    })
+    startTime!: string;
+
+    @IsString()
+    @Matches(/^([01]\d|2[0-3]):([0-5]\d)$/, {
+        message: 'endTime must be in HH:mm format',
+    })
+    endTime!: string;
+
+    @IsInt()
+    @Min(0)
+    maxAppt!: number;
+}
+
+export class GenerateWaveSlotsDto {
+    @IsString()
+    @Matches(/^([01]\d|2[0-3]):([0-5]\d)$/, {
+        message: 'startTime must be in HH:mm format',
+    })
+    startTime!: string;
+
+    @IsString()
+    @Matches(/^([01]\d|2[0-3]):([0-5]\d)$/, {
+        message: 'endTime must be in HH:mm format',
+    })
+    endTime!: string;
+
+    @IsInt()
+    @Min(1)
+    slotDuration!: number;
+
+    @IsOptional()
+    @IsInt()
+    @Min(0)
+    totalMaxAppt?: number;
+}
+
+export class UpdateWaveSlotsDto {
+    @IsArray()
+    @ValidateNested({ each: true })
+    @Type(() => WaveSlotDto)
+    slots!: WaveSlotDto[];
+}
+
 export class AvailabilityConfigDto {
     @IsEnum(ScheduleType)
     scheduleType!: ScheduleType;
@@ -30,8 +78,8 @@ export class AvailabilityConfigDto {
 
     @IsOptional()
     @IsInt()
-    @Min(1)
-    maxAppt?: number; // Capacity per Slot for WAVE, Capacity for STREAM block.
+    @Min(0)
+    maxAppt?: number; // Total capacity for the block
 
     @IsOptional()
     @IsString()
@@ -51,6 +99,12 @@ export class AvailabilityConfigDto {
     @IsInt()
     @Min(1)
     streamBatchSize?: number; // Only for STREAM
+
+    @IsOptional()
+    @IsArray()
+    @ValidateNested({ each: true })
+    @Type(() => WaveSlotDto)
+    slots?: WaveSlotDto[];
 }
 
 

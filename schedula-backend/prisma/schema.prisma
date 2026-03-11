@@ -22,6 +22,32 @@ enum ApprovalStatus {
   REJECTED
 }
 
+enum AppointmentStatus {
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+model Appointment {
+  id              String            @id @default(uuid())
+  patientId       String
+  patient         Patient           @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  doctorId        String
+  doctor          Doctor            @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  slotId          String
+  slot            AvailabilitySlot  @relation(fields: [slotId], references: [id], onDelete: Cascade)
+  
+  appointmentDate DateTime          // The actual date of the appointment
+  status          AppointmentStatus @default(CONFIRMED)
+  notes           String?
+  isRescheduled   Boolean           @default(false)
+  
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@unique([patientId, appointmentDate, slotId], name: "patient_appointment_unique")
+}
+
 model User {
   id                 String              @id @default(uuid())
   email              String              @unique
@@ -51,21 +77,23 @@ model Doctor {
   profile         Profile?
   specializations Specialization[]
   availabilities  Availability[]
+  appointments    Appointment[]
 }
 
 model Patient {
-  id         String    @id @default(uuid())
-  userId     String    @unique
-  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  firstName  String
-  lastName   String?
-  phone      String?
-  dob        DateTime?
-  gender     String?
-  bloodGroup String?
-  address    String?
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  id           String        @id @default(uuid())
+  userId       String        @unique
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  firstName    String
+  lastName     String?
+  phone        String?
+  dob          DateTime?
+  gender       String?
+  bloodGroup   String?
+  address      String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  appointments Appointment[]
 }
 
 model Profile {
@@ -132,6 +160,8 @@ model AvailabilitySlot {
   endTime   String
   maxAppt   Int // Appointments allowed for this specific slot
 
+  appointments Appointment[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -145,3 +175,4 @@ model VerificationToken {
   used      Boolean  @default(false)
   createdAt DateTime @default(now())
 }
+
