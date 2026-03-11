@@ -4,12 +4,14 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { Availability, AvailabilitySlot } from '@prisma/client';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { CreateSpecializationDto } from './dto/create-specialization.dto';
 import {
   SetDaySlotsDto,
   SetWeekAvailabilityDto,
   AvailabilityConfigDto,
+  SetCustomAvailabilityDto,
 } from './dto/set-availability.dto';
 
 const DAY_NAMES = [
@@ -25,7 +27,7 @@ const DAY_NAMES = [
 
 @Injectable()
 export class DoctorsService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(private readonly prisma: PrismaService) { } // Prisma client initialized here
 
   // "monday" → 1, "tuesday" → 2, etc.
   private dayNameToNumber(day: string): number {
@@ -124,30 +126,47 @@ export class DoctorsService {
     return `${hour12}:${m.toString().padStart(2, '0')} ${period}`;
   }
 
-  private generateWaveSlots(startMinutes: number, endMinutes: number, duration: number, maxAppt: number) {
-    const slots: { startTime: string; endTime: string; maxAppt: number }[] = [];
+  private generateWaveSlots(startMinutes: number, endMinutes: number, duration: number, maxApptPerSlot: number) {
+    const units: { startTime: string; endTime: string; maxAppt: number }[] = [];
     let current = startMinutes;
 
     while (current < endMinutes) {
       const next = current + duration;
-      if (next > endMinutes) break; // Don't create partial slots
+      if (next > endMinutes) break;
 
-      const stHour = Math.floor(current / 60).toString().padStart(2, '0');
-      const stMin = (current % 60).toString().padStart(2, '0');
-
-      const enHour = Math.floor(next / 60).toString().padStart(2, '0');
-      const enMin = (next % 60).toString().padStart(2, '0');
-
-      slots.push({
-        startTime: `${stHour}:${stMin}`,
-        endTime: `${enHour}:${enMin}`,
-        maxAppt
+      units.push({
+        startTime: this.minutesToTime(current),
+        endTime: this.minutesToTime(next),
+        maxAppt: maxApptPerSlot,
       });
-
       current = next;
     }
+    return units;
+  }
 
-    return slots;
+
+  private generateStreamBatches(startMinutes: number, endMinutes: number, interval: number, batchSize: number) {
+    const batches: { startTime: string; endTime: string; maxAppt: number }[] = [];
+    let current = startMinutes;
+
+    while (current < endMinutes) {
+      const next = current + interval;
+      if (next > endMinutes) break;
+
+      batches.push({
+        startTime: this.minutesToTime(current),
+        endTime: this.minutesToTime(next),
+        maxAppt: batchSize,
+      });
+      current = next;
+    }
+    return batches;
+  }
+
+  private minutesToTime(minutes: number): string {
+    const h = Math.floor(minutes / 60).toString().padStart(2, '0');
+    const m = (minutes % 60).toString().padStart(2, '0');
+    return `${h}:${m}`;
   }
 
   private validateAvailabilities(availabilities: AvailabilityConfigDto[]) {
@@ -160,11 +179,19 @@ export class DoctorsService {
         );
       }
 
-      if (config.scheduleType === 'WAVE') {
-        if (!config.slotDuration) {
-          throw new BadRequestException('slotDuration is required for WAVE scheduling');
+      const diff = end - start;
+
+      if (config.scheduleType === 'STREAM') {
+        if (!config.maxAppt) throw new BadRequestException('maxAppt is required for STREAM scheduling');
+        if (config.streamInterval) {
+          if (diff % config.streamInterval !== 0) {
+            throw new BadRequestException(`streamInterval (${config.streamInterval} min) must perfectly divide the time range (${diff} min)`);
+          }
+          if (!config.streamBatchSize) throw new BadRequestException('streamBatchSize is required when streamInterval is provided');
         }
-        const diff = end - start;
+      } else if (config.scheduleType === 'WAVE') {
+        if (!config.slotDuration) throw new BadRequestException('slotDuration is required for WAVE scheduling');
+        if (!config.maxAppt) throw new BadRequestException('maxAppt (Slot Capacity) is required for WAVE scheduling');
         if (diff % config.slotDuration !== 0) {
           throw new BadRequestException(`slotDuration (${config.slotDuration} min) must perfectly divide the time range (${diff} min)`);
         }
@@ -203,14 +230,21 @@ export class DoctorsService {
       if (deleted.count > 0) isUpdate = true;
 
       for (const config of dto.availabilities) {
-        const generatedSlots = config.scheduleType === 'WAVE'
-          ? this.generateWaveSlots(
-            this.timeToMinutes(config.consultingStartTime),
-            this.timeToMinutes(config.consultingEndTime),
-            config.slotDuration!,
-            config.maxAppt
-          )
-          : [];
+        const start = this.timeToMinutes(config.consultingStartTime);
+        const end = this.timeToMinutes(config.consultingEndTime);
+
+        const isWave = config.scheduleType === 'WAVE';
+        const units = isWave
+          ? this.generateWaveSlots(start, end, config.slotDuration!, config.maxAppt!)
+          : config.streamInterval
+            ? this.generateStreamBatches(start, end, config.streamInterval!, config.streamBatchSize!)
+            : [{ startTime: config.consultingStartTime, endTime: config.consultingEndTime, maxAppt: config.maxAppt! }];
+
+        const totalMaxAppt = isWave
+          ? config.maxAppt!
+          : config.streamInterval
+            ? units.reduce((sum: number, u: any) => sum + u.maxAppt, 0)
+            : config.maxAppt!;
 
         await tx.availability.create({
           data: {
@@ -219,10 +253,12 @@ export class DoctorsService {
             scheduleType: config.scheduleType,
             consultingStartTime: config.consultingStartTime,
             consultingEndTime: config.consultingEndTime,
-            maxAppt: config.maxAppt,
+            maxAppt: totalMaxAppt,
             session: config.session || null,
-            slotDuration: config.slotDuration || null,
-            slots: generatedSlots.length > 0 ? { create: generatedSlots } : undefined,
+            slotDuration: isWave ? config.slotDuration : null,
+            streamInterval: config.scheduleType === 'STREAM' ? config.streamInterval : null,
+            streamBatchSize: config.scheduleType === 'STREAM' ? config.streamBatchSize : null,
+            slots: { create: units },
           },
         });
       }
@@ -260,14 +296,21 @@ export class DoctorsService {
       for (const daySchedule of dto.schedule) {
         const dayOfWeek = this.dayNameToNumber(daySchedule.day);
         for (const config of daySchedule.availabilities) {
-          const generatedSlots = config.scheduleType === 'WAVE'
-            ? this.generateWaveSlots(
-              this.timeToMinutes(config.consultingStartTime),
-              this.timeToMinutes(config.consultingEndTime),
-              config.slotDuration!,
-              config.maxAppt
-            )
-            : [];
+          const start = this.timeToMinutes(config.consultingStartTime);
+          const end = this.timeToMinutes(config.consultingEndTime);
+
+          const isWave = config.scheduleType === 'WAVE';
+          const units = isWave
+            ? this.generateWaveSlots(start, end, config.slotDuration!, config.maxAppt!)
+            : config.streamInterval
+              ? this.generateStreamBatches(start, end, config.streamInterval!, config.streamBatchSize!)
+              : [{ startTime: config.consultingStartTime, endTime: config.consultingEndTime, maxAppt: config.maxAppt! }];
+
+          const totalMaxAppt = isWave
+            ? config.maxAppt!
+            : config.streamInterval
+              ? units.reduce((sum: number, u: any) => sum + u.maxAppt, 0)
+              : config.maxAppt!;
 
           await tx.availability.create({
             data: {
@@ -276,10 +319,12 @@ export class DoctorsService {
               scheduleType: config.scheduleType,
               consultingStartTime: config.consultingStartTime,
               consultingEndTime: config.consultingEndTime,
-              maxAppt: config.maxAppt,
+              maxAppt: totalMaxAppt,
               session: config.session || null,
-              slotDuration: config.slotDuration || null,
-              slots: generatedSlots.length > 0 ? { create: generatedSlots } : undefined,
+              slotDuration: isWave ? config.slotDuration : null,
+              streamInterval: config.scheduleType === 'STREAM' ? config.streamInterval : null,
+              streamBatchSize: config.scheduleType === 'STREAM' ? config.streamBatchSize : null,
+              slots: { create: units },
             },
           });
         }
@@ -290,6 +335,106 @@ export class DoctorsService {
     return {
       message: `Weekly availability ${isUpdate ? 'updated' : 'created'} successfully`,
       schedule: scheduleData.schedule
+    };
+  }
+
+  // POST /api/v1/doctors/custom-availability/:date
+  async setCustomAvailability(userId: string, dateStr: string, dto: SetCustomAvailabilityDto) {
+    const doctor = await this.getDoctorByUserId(userId);
+    const targetDate = new Date(dateStr);
+    if (isNaN(targetDate.getTime())) {
+      throw new BadRequestException('Invalid date format. Use YYYY-MM-DD');
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const checkDate = new Date(targetDate);
+    checkDate.setHours(0, 0, 0, 0);
+
+    if (checkDate < today) {
+      throw new BadRequestException('Cannot set availability for past dates');
+    }
+
+    const currentYear = today.getFullYear();
+    if (checkDate.getFullYear() > currentYear) {
+      throw new BadRequestException(`Cannot set availability for future years. Please stay within ${currentYear}`);
+    }
+
+    const dayOfWeek = targetDate.getDay();
+    this.validateAvailabilities(dto.availabilities);
+
+    let isUpdate = false;
+
+    await this.prisma.$transaction(async (tx) => {
+      // 1. Delete existing custom availability for this specific date
+      const deletedCustom = await tx.availability.deleteMany({
+        where: { doctorId: doctor.id, date: targetDate },
+      });
+
+      // 2. Delete existing recurring availability for this day of the week (SYNC LOGIC)
+      await tx.availability.deleteMany({
+        where: { doctorId: doctor.id, dayOfWeek: dayOfWeek, date: null },
+      });
+
+      if (deletedCustom.count > 0) isUpdate = true;
+
+      for (const config of dto.availabilities) {
+        const start = this.timeToMinutes(config.consultingStartTime);
+        const end = this.timeToMinutes(config.consultingEndTime);
+
+        const isWave = config.scheduleType === 'WAVE';
+        const units = isWave
+          ? this.generateWaveSlots(start, end, config.slotDuration!, config.maxAppt!)
+          : config.streamInterval
+            ? this.generateStreamBatches(start, end, config.streamInterval!, config.streamBatchSize!)
+            : [{ startTime: config.consultingStartTime, endTime: config.consultingEndTime, maxAppt: config.maxAppt! }];
+
+        const totalMaxAppt = isWave
+          ? config.maxAppt!
+          : config.streamInterval
+            ? units.reduce((sum: number, u: any) => sum + u.maxAppt, 0)
+            : config.maxAppt!;
+
+        // Create the Custom record (Specific Date)
+        await tx.availability.create({
+          data: {
+            doctorId: doctor.id,
+            date: targetDate,
+            scheduleType: config.scheduleType,
+            consultingStartTime: config.consultingStartTime,
+            consultingEndTime: config.consultingEndTime,
+            maxAppt: totalMaxAppt,
+            session: config.session || null,
+            slotDuration: isWave ? config.slotDuration : null,
+            streamInterval: config.scheduleType === 'STREAM' ? config.streamInterval : null,
+            streamBatchSize: config.scheduleType === 'STREAM' ? config.streamBatchSize : null,
+            slots: { create: units },
+          },
+        });
+
+        // Create the Recurring record (Day of Week) - This keeps them in sync
+        await tx.availability.create({
+          data: {
+            doctorId: doctor.id,
+            dayOfWeek: dayOfWeek,
+            date: null,
+            scheduleType: config.scheduleType,
+            consultingStartTime: config.consultingStartTime,
+            consultingEndTime: config.consultingEndTime,
+            maxAppt: totalMaxAppt,
+            session: config.session || null,
+            slotDuration: isWave ? config.slotDuration : null,
+            streamInterval: config.scheduleType === 'STREAM' ? config.streamInterval : null,
+            streamBatchSize: config.scheduleType === 'STREAM' ? config.streamBatchSize : null,
+            slots: { create: units },
+          },
+        });
+      }
+    });
+
+    return {
+      message: `Custom availability set successfully for ${dateStr}. Weekly schedule for ${DAY_NAMES[dayOfWeek]} has also been updated.`,
     };
   }
 
@@ -307,6 +452,26 @@ export class DoctorsService {
 
     return {
       message: `Availability deleted successfully for ${this.capitalize(day)}`,
+    };
+  }
+
+  // DELETE /api/v1/doctors/availability/custom/:date
+  async deleteCustomAvailability(userId: string, dateStr: string) {
+    const doctor = await this.getDoctorByUserId(userId);
+    const date = new Date(dateStr);
+    if (isNaN(date.getTime())) {
+      throw new BadRequestException('Invalid date format');
+    }
+
+    await this.prisma.availability.deleteMany({
+      where: {
+        doctorId: doctor.id,
+        date,
+      },
+    });
+
+    return {
+      message: `Custom availability deleted successfully for ${dateStr}`,
     };
   }
 
@@ -341,47 +506,75 @@ export class DoctorsService {
   async getMyAvailability(userId: string) {
     const doctor = await this.getDoctorByUserId(userId);
 
-    const availabilities = await this.prisma.availability.findMany({
-      where: { doctorId: doctor.id },
+    const recurring = await this.prisma.availability.findMany({
+      where: { doctorId: doctor.id, date: null },
       include: { slots: true },
       orderBy: [{ dayOfWeek: 'asc' }, { consultingStartTime: 'asc' }],
     });
 
+    const custom = await this.prisma.availability.findMany({
+      where: { doctorId: doctor.id, date: { not: null } },
+      include: { slots: true },
+      orderBy: [{ date: 'asc' }, { consultingStartTime: 'asc' }],
+    });
+
     const weekSchedule = DAY_NAMES.map((dayName, index) => {
-      const dayAvailabilities = availabilities.filter((a) => a.dayOfWeek === index);
+      const dayAvailabilities = recurring.filter((a) => a.dayOfWeek === index);
       return {
         day: this.capitalize(dayName),
         dayOfWeek: index,
         isAvailable: dayAvailabilities.length > 0,
-        availabilities: dayAvailabilities.map((a) => ({
-          id: a.id,
-          scheduleType: a.scheduleType,
-          consultingStartTime: a.consultingStartTime,
-          consultingEndTime: a.consultingEndTime,
-          maxAppt: a.maxAppt,
-          booked: 0, // Placeholder for tracking booked slots
-          available: a.maxAppt, // Placeholder for tracking available slots
-          session: a.session,
-          slotDuration: a.slotDuration,
-          display: `${this.to12Hour(a.consultingStartTime)} to ${this.to12Hour(a.consultingEndTime)}`,
-          ...(a.scheduleType === 'WAVE' ? {
-            generatedSlots: a.slots.map(s => ({
-              id: s.id,
-              startTime: s.startTime,
-              endTime: s.endTime,
-              maxAppt: s.maxAppt,
-              booked: 0, // Placeholder for tracking booked slots
-              available: s.maxAppt, // Placeholder for tracking available slots
-              display: `${this.to12Hour(s.startTime)} to ${this.to12Hour(s.endTime)}`
-            })).sort((s1, s2) => this.timeToMinutes(s1.startTime) - this.timeToMinutes(s2.startTime))
-          } : {})
-        })),
+        availabilities: dayAvailabilities.map((a) => this.mapAvailability(a)),
       };
     });
 
     return {
       message: 'Availability fetched successfully',
-      schedule: weekSchedule
+      schedule: weekSchedule,
+      customs: custom.map((a: any) => ({
+        date: a.date?.toISOString().split('T')[0],
+        ...this.mapAvailability(a),
+      })),
     };
+  }
+
+  private mapAvailability(a: Availability & { slots: AvailabilitySlot[] }) {
+    const isWave = a.scheduleType === 'WAVE';
+    const units = a.slots.map((s: AvailabilitySlot) => ({
+      id: s.id,
+      startTime: s.startTime,
+      endTime: s.endTime,
+      maxAppt: s.maxAppt,
+      booked: 0, // Placeholder
+      available: s.maxAppt, // Placeholder
+      display: isWave
+        ? `${this.to12Hour(s.startTime)} to ${this.to12Hour(s.endTime)}`
+        : `${this.to12Hour(s.startTime)} Stream`
+    })).sort((s1, s2) => this.timeToMinutes(s1.startTime) - this.timeToMinutes(s2.startTime));
+
+    const baseResult: any = {
+      id: a.id,
+      scheduleType: a.scheduleType,
+      consultingStartTime: a.consultingStartTime,
+      consultingEndTime: a.consultingEndTime,
+      maxAppt: a.maxAppt,
+      booked: 0, // Placeholder
+      available: a.maxAppt, // Placeholder
+      session: a.session,
+      display: `${this.to12Hour(a.consultingStartTime)} to ${this.to12Hour(a.consultingEndTime)}`,
+    };
+
+    if (isWave) {
+      return {
+        ...baseResult,
+        slotDuration: a.slotDuration,
+        generatedSlots: units,
+      };
+    } else {
+      return {
+        ...baseResult,
+        slotDuration: null,
+      };
+    }
   }
 }

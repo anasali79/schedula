@@ -19,6 +19,7 @@ import { CreateSpecializationDto } from './dto/create-specialization.dto';
 import {
   SetDaySlotsDto,
   SetWeekAvailabilityDto,
+  SetCustomAvailabilityDto,
 } from './dto/set-availability.dto';
 
 @Controller('doctors')
@@ -75,6 +76,17 @@ export class DoctorsController {
     return this.doctorsService.setWeekAvailability(userId, dto);
   }
 
+  // Put/pi/v1/doctors/custom-availability/:date
+  @Put('custom-availability/:date')
+  setCustomAvailability(
+    @CurrentUser('userId') userId: string,
+    @Param('date') date: string,
+    @Body() dto: SetCustomAvailabilityDto,
+  ) {
+    return this.doctorsService.setCustomAvailability(userId, date, dto);
+  }
+
+
   // DELETE /api/v1/doctors/availability/monday
   @Delete('availability/:day')
   deleteDayAvailability(
@@ -82,6 +94,15 @@ export class DoctorsController {
     @Param('day') day: string,
   ) {
     return this.doctorsService.deleteDayAvailability(userId, day);
+  }
+
+  // DELETE /api/v1/doctors/availability/custom/:date
+  @Delete('custom-availability/:date')
+  deleteCustomAvailability(
+    @CurrentUser('userId') userId: string,
+    @Param('date') date: string,
+  ) {
+    return this.doctorsService.deleteCustomAvailability(userId, date);
   }
 
   // DELETE /api/v1/doctors/availability/slot/:slotId

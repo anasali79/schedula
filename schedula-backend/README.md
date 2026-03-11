@@ -169,64 +169,64 @@ Below is the comprehensive list of all API endpoints available in the applicatio
 
 ### 📅 Doctor Availability Management
 
-Schedula supports two main scheduling systems:
-- **STREAM**: Sets a block of time (e.g., 9:00 to 12:00) with a maximum number of total appointments. No individual time slots are explicitly tracked.
-- **WAVE**: Generates distinct, evenly divided time slots based on the `slotDuration`. (e.g. 9:00-9:15, 9:15-9:30, with specific `maxAppt` per generated slot).
+Schedula supports a **Hybrid** scheduling system (Recurring + Custom) with two modes:
+
+- **WAVE**: Generates distinct, fixed-duration slots (e.g., 30 min) where each slot has a specific capacity (`maxAppt`). Ideal for structured appointments.
+- **STREAM**: Represents a continuous block of time or larger batches (intervals) where patients are managed in a flow/queue system.
 
 #### 1. Get All Availability
-- **GET** `/doctors/availability`
-- **Response**: Returns an array of availability records grouped by days, along with any generated `slots`.
+- **GET** `/api/v1/doctors/availability`
+- **Response**: Returns recurring weekly schedule AND `customs` (date-specific) entries.
 
-#### 2. Set Availability For a Specific Day (e.g., Monday)
-Replaces all existing availabilities for the provided day (`monday`, `tuesday`, `wednesday`, etc.)
-- **PUT** `/doctors/availability/:day` (Example: `/doctors/availability/monday`)
-- **Body**: Includes an array of availability configurations.
+#### 2. Set Weekly Recurring Availability
+Replaces all existing availabilities for the provided day (`monday`, `tuesday`, etc.)
+- **PUT** `/api/v1/doctors/availability/:day`
+- **Example (WAVE)**: 09:00 - 12:00 with 30 min slots (6 slots total, each allowing 5 patients).
+  ```json
+  {
+    "availabilities": [
+      {
+        "scheduleType": "WAVE",
+        "consultingStartTime": "09:00",
+        "consultingEndTime": "12:00",
+        "slotDuration": 30,
+        "maxAppt": 5,
+        "session": "Morning Clinic"
+      }
+    ]
+  }
+  ```
+
+#### 3. Set Custom Date Availability (Hybrid Sync)
+Sets availability for a specific date. **Note**: This will also update the weekly template for that day.
+- **POST** `/api/v1/doctors/custom-availability/:date` (Example: `/2026-03-25`)
+- **Example (STREAM)**: 09:00 - 12:00 with 60 min batches (Total 3 batches, 15 patients).
   ```json
   {
     "availabilities": [
       {
         "scheduleType": "STREAM",
-        "consultingStartTime": "13:00",
-        "consultingEndTime": "14:00",
-        "maxAppt": 30,
-        "session": "Afternoon"
-      },
-      {
-        "scheduleType": "WAVE",
-        "consultingStartTime": "15:00",
-        "consultingEndTime": "17:00",
-        "maxAppt": 2, 
-        "slotDuration": 30,
-        "session": "Evening"
+        "consultingStartTime": "09:00",
+        "consultingEndTime": "12:00",
+        "streamInterval": 60,
+        "streamBatchSize": 5,
+        "session": "Morning Stream"
       }
     ]
   }
   ```
 
-#### 3. Set Availability For the Whole Week
-Replaces the availability for all the supplied days at once.
-- **PUT** `/doctors/availability`
-- **Body**:
-  ```json
-  {
-    "schedule": [
-      {
-        "day": "monday",
-        "availabilities": [
-          {
-            "scheduleType": "STREAM",
-            "consultingStartTime": "10:00",
-            "consultingEndTime": "12:00",
-            "maxAppt": 10
-          }
-        ]
-      }
-    ]
-  }
-  ```
+#### 4. Delete Availabilities
+- **DELETE** `/api/v1/doctors/availability/:day` (Delete recurring day)
+- **DELETE** `/api/v1/doctors/custom-availability/:date` (Delete custom date)
+- **DELETE** `/api/v1/doctors/availability/slot/:slotId` (Delete single unit/slot)
 
-#### 4. Delete Entire Day's Availability
-- **DELETE** `/doctors/availability/:day`
+---
 
-#### 5. Delete a Specific Slot / Time Block
-- **DELETE** `/doctors/availability/slot/:slotId`
+### 💡 Scheduling Rules:
+- **WAVE**: Requires `slotDuration` and `maxAppt` (Capacity per slot).
+- **STREAM**: Requires `maxAppt` (Capacity per block). Can optionally use `streamInterval` and `streamBatchSize`.
+- **Restrictions**: 
+    - Cannot set availability for past dates.
+    - Cannot set availability for future years (must stay within current year).
+    - URL date must be in `YYYY-MM-DD` format.
