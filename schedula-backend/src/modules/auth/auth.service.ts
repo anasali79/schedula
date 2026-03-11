@@ -205,6 +205,8 @@ export class AuthService {
           isVerified: true,
         },
       });
+      // Send welcome email for new Google users
+      await this.emailService.sendGoogleWelcomeEmail(email);
     } else if (!user.googleId) {
       user = await this.prisma.user.update({
         where: { id: user.id },

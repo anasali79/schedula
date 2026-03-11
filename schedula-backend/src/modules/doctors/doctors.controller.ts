@@ -6,6 +6,7 @@ import {
   Param,
   Post,
   Put,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { DoctorsService } from './doctors.service';
@@ -20,20 +21,41 @@ import {
   SetDaySlotsDto,
   SetWeekAvailabilityDto,
   SetCustomAvailabilityDto,
+  GenerateWaveSlotsDto,
+  UpdateWaveSlotsDto,
 } from './dto/set-availability.dto';
 
 @Controller('doctors')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(Role.DOCTOR)
 export class DoctorsController {
   constructor(private readonly doctorsService: DoctorsService) { }
 
+  // --- DOCTOR ONLY (Profile & Availability Management) ---
+
+  @Post('wave/generate-slots')
+  @Roles(Role.DOCTOR)
+  generateWaveSlotsPreview(@Body() dto: GenerateWaveSlotsDto) {
+    return this.doctorsService.generateWaveSlotsPreview(dto);
+  }
+
+  @Put('availability/:id/update-slots')
+  @Roles(Role.DOCTOR)
+  updateWaveSlots(
+    @CurrentUser('userId') userId: string,
+    @Param('id') availabilityId: string,
+    @Body() dto: UpdateWaveSlotsDto,
+  ) {
+    return this.doctorsService.updateWaveSlots(userId, availabilityId, dto);
+  }
+
   @Get('me')
+  @Roles(Role.DOCTOR)
   getMyProfile(@CurrentUser('userId') userId: string) {
     return this.doctorsService.getMyProfile(userId);
   }
 
   @Put('profile')
+  @Roles(Role.DOCTOR)
   updateProfile(
     @CurrentUser('userId') userId: string,
     @Body() dto: UpdateProfileDto,
@@ -42,6 +64,7 @@ export class DoctorsController {
   }
 
   @Post('specialization')
+  @Roles(Role.DOCTOR)
   addSpecialization(
     @CurrentUser('userId') userId: string,
     @Body() dto: CreateSpecializationDto,
@@ -49,15 +72,17 @@ export class DoctorsController {
     return this.doctorsService.addSpecialization(userId, dto);
   }
 
-  // GET /api/v1/doctors/availability
-  @Get('availability')
-  getMyAvailability(@CurrentUser('userId') userId: string) {
-    return this.doctorsService.getMyAvailability(userId);
+  @Get('me/availability') // For Doctor to view their own
+  @Roles(Role.DOCTOR)
+  getMyAvailability(
+    @CurrentUser('userId') userId: string,
+    @Query('date') date?: string,
+  ) {
+    return this.doctorsService.getMyAvailability(userId, date);
   }
 
-  // PUT /api/v1/doctors/availability/monday
-  // Body: { "slots": [{ "startTime": "13:00", "endTime": "14:00" }] }
   @Put('availability/:day')
+  @Roles(Role.DOCTOR)
   setDayAvailability(
     @CurrentUser('userId') userId: string,
     @Param('day') day: string,
@@ -66,9 +91,8 @@ export class DoctorsController {
     return this.doctorsService.setDayAvailability(userId, day, dto);
   }
 
-  // PUT /api/v1/doctors/availability
-  // Body: { "schedule": [{ "day": "monday", "slots": [...] }] }
   @Put('availability')
+  @Roles(Role.DOCTOR)
   setWeekAvailability(
     @CurrentUser('userId') userId: string,
     @Body() dto: SetWeekAvailabilityDto,
@@ -76,8 +100,8 @@ export class DoctorsController {
     return this.doctorsService.setWeekAvailability(userId, dto);
   }
 
-  // Put/pi/v1/doctors/custom-availability/:date
   @Put('custom-availability/:date')
+  @Roles(Role.DOCTOR)
   setCustomAvailability(
     @CurrentUser('userId') userId: string,
     @Param('date') date: string,
@@ -87,8 +111,8 @@ export class DoctorsController {
   }
 
 
-  // DELETE /api/v1/doctors/availability/monday
   @Delete('availability/:day')
+  @Roles(Role.DOCTOR)
   deleteDayAvailability(
     @CurrentUser('userId') userId: string,
     @Param('day') day: string,
@@ -96,8 +120,8 @@ export class DoctorsController {
     return this.doctorsService.deleteDayAvailability(userId, day);
   }
 
-  // DELETE /api/v1/doctors/availability/custom/:date
   @Delete('custom-availability/:date')
+  @Roles(Role.DOCTOR)
   deleteCustomAvailability(
     @CurrentUser('userId') userId: string,
     @Param('date') date: string,
@@ -105,12 +129,29 @@ export class DoctorsController {
     return this.doctorsService.deleteCustomAvailability(userId, date);
   }
 
-  // DELETE /api/v1/doctors/availability/slot/:slotId
   @Delete('availability/slot/:slotId')
+  @Roles(Role.DOCTOR)
   deleteSlot(
     @CurrentUser('userId') userId: string,
     @Param('slotId') slotId: string,
   ) {
     return this.doctorsService.deleteSlot(userId, slotId);
+  }
+
+  // --- PATIENT & DOCTOR ---
+
+  @Get('list')
+  @Roles(Role.PATIENT, Role.DOCTOR)
+  listDoctors(@Query('specialization') specialization?: string) {
+    return this.doctorsService.listDoctors(specialization);
+  }
+
+  @Get(':doctorId/availability')
+  @Roles(Role.PATIENT, Role.DOCTOR)
+  getDoctorAvailability(
+    @Param('doctorId') doctorId: string,
+    @Query('date') date?: string,
+  ) {
+    return this.doctorsService.getDoctorAvailability(doctorId, date);
   }
 }

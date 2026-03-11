@@ -47,8 +47,6 @@ Server runs on `http://localhost:3000` by default.
 
 ## 📚 API Reference
 
-Below is the comprehensive list of all API endpoints available in the application.
-
 ### 🔐 Authentication (`/auth`)
 
 #### 1. Signup (Local Registration)
@@ -60,7 +58,6 @@ Below is the comprehensive list of all API endpoints available in the applicatio
     "password": "Password123!"
   }
   ```
-- **Response**: `{ "user": { "id", "email", "provider" }, "tokens": { "accessToken", "refreshToken" } }`
 
 #### 2. Signin
 - **POST** `/auth/signin`
@@ -71,162 +68,96 @@ Below is the comprehensive list of all API endpoints available in the applicatio
     "password": "Password123!"
   }
   ```
-- **Response**: `{ "user": { ... }, "tokens": { "accessToken", "refreshToken" } }`
 
-#### 3. Email Verification
-- **GET** `/auth/verify-email?token=...`
-- **POST** `/auth/verify-email` (Accepts `{ "token": "..." }`)
-- **Response**: `{ "message": "Email verified successfully" }`
-
-#### 4. Onboard Patient
-*Requires JWT Authentication.*
-- **POST** `/auth/onboard/patient`
-- **Body**:
-  ```json
-  {
-    "firstName": "Jane",
-    "lastName": "Doe"
-  }
-  ```
-- **Response**: `{ "user": { "role": "PATIENT" }, "tokens": { ... } }`
-
-#### 5. Onboard Doctor
-*Requires JWT Authentication.*
-- **POST** `/auth/onboard/doctor`
-- **Body**:
-  ```json
-  {
-    "firstName": "John",
-    "lastName": "Doe"
-  }
-  ```
-- **Response**: `{ "user": { "role": "DOCTOR" }, "doctor": { "id", "firstName" }, "tokens": { ... } }`
-
-
-#### 6. Google OAuth
-- **GET** `/auth/google` (Redirects to Google Sign-In)
-- **GET** `/auth/google/callback` (Handles Google redirect & sets auth cookies)
-
-#### 7. Delete User
-*Requires JWT Authentication.*
-- **DELETE** `/auth/delete/user`
-- **Response**: `{ "message": "User deleted successfully" }`
+#### 3. Onboard Patient/Doctor
+- **POST** `/auth/onboard/patient` | `/auth/onboard/doctor`
+- **Body**: `{ "firstName": "John", "lastName": "Doe" }`
 
 ---
 
-### 🧥 Patient Management (`/patients`)
-*Requires JWT Authentication and `Role = PATIENT`.*
+### 👨‍⚕️ Doctor Availability (`/api/v1/doctors`)
 
-#### 1. Get My Profile
-- **GET** `/patients/me`
-- **Response**: Returns the user object with associated patient profile.
+#### 1. Get Doctor Availability (Public/Patient)
+- **GET** `/api/v1/doctors/:doctorId/availability`
+- **Query**: `?targetDate=2026-03-16` (Optional)
+- **Features**: Includes `formattedDate`, localized day names, and full slot mappings with accurate dates.
 
-#### 2. Update Profile
-- **PUT** `/patients/profile`
-- **Body**:
-  ```json
-  {
-    "firstName": "Jane",
-    "lastName": "Doe",
-    "phone": "+1234567890",
-    "dob": "1995-05-15",
-    "gender": "Female",
-    "bloodGroup": "O+",
-    "address": "123 Main St, City"
-  }
-  ```
+#### 2. Set Availability (Doctor)
+- **PUT** `/api/v1/doctors/availability` (Weekly)
+- **PUT** `/api/v1/doctors/availability/:day` (Daily)
+- **PUT** `/api/v1/doctors/custom-availability/:date` (Single Date Override)
 
 ---
 
-### 👨‍⚕️ Doctor Management (`/doctors`)
-*Requires JWT Authentication and `Role = DOCTOR`.*
+### 📋 Appointment Management (`/api/v1/appointments`)
 
-#### 1. Get My Profile
-- **GET** `/doctors/me`
-- **Response**: Returns the complete user object, associated doctor record, profile, specializations, and availability.
-
-#### 2. Update Profile
-- **PUT** `/doctors/profile`
+#### 1. Book Appointment
+- **POST** `/api/v1/appointments/book`
 - **Body**:
   ```json
   {
-    "bio": "Experienced cardiologist.",
-    "experienceYears": 10,
-    "consultationFee": 50.00
+    "slotId": "uuid",
+    "appointmentDate": "2026-03-16",
+    "notes": "Consultation"
+  }
+  ```
+- **New Feature**: **Dynamic Reporting Time** for WAVE scheduling. 
+  - *Formula*: `SlotStartTime + (Token-1) * (SlotDuration / MaxAppt)`.
+  - Patients get a specific time (e.g., 9:03 AM) instead of just the slot start time.
+
+#### 2. My Appointment History (Dashboard)
+- **GET** `/api/v1/appointments/me`
+- **Response Structure**:
+  ```json
+  {
+    "summary": {
+      "total": 10,
+      "upcoming": 2,
+      "rescheduled": 1,
+      "completed": 5,
+      "cancelled": 2
+    },
+    "history": {
+      "upcoming": [...],
+      "rescheduled": [...],
+      "completed": [...],
+      "cancelled": [...]
+    }
   }
   ```
 
-#### 3. Add Specialization
-- **POST** `/doctors/specialization`
+#### 3. Cancel Appointment (Both Sides)
+- **PATCH** `/api/v1/appointments/:id/cancel`
+- **Access**: Both Patients and Doctors can cancel.
+- **Action**: Updates status and sends email notifications to both parties.
+
+#### 4. Reschedule Appointment (Both Sides)
+- **PATCH** `/api/v1/appointments/:id/reschedule`
+- **Access**: Both Patients and Doctors.
 - **Body**:
   ```json
   {
-    "name": "Cardiology"
+    "slotId": "new-slot-uuid",
+    "appointmentDate": "2026-03-23"
   }
   ```
+- **Action**: Moves appointment to a new slot, updates token, calculates new reporting time, and sends confirmation emails.
+
+#### 5. Update Status (Doctor Only)
+- **PATCH** `/api/v1/appointments/:id/status`
+- **Body**: `{ "status": "COMPLETED" }`
 
 ---
 
-### 📅 Doctor Availability Management
-
-Schedula supports a **Hybrid** scheduling system (Recurring + Custom) with two modes:
-
-- **WAVE**: Generates distinct, fixed-duration slots (e.g., 30 min) where each slot has a specific capacity (`maxAppt`). Ideal for structured appointments.
-- **STREAM**: Represents a continuous block of time or larger batches (intervals) where patients are managed in a flow/queue system.
-
-#### 1. Get All Availability
-- **GET** `/api/v1/doctors/availability`
-- **Response**: Returns recurring weekly schedule AND `customs` (date-specific) entries.
-
-#### 2. Set Weekly Recurring Availability
-Replaces all existing availabilities for the provided day (`monday`, `tuesday`, etc.)
-- **PUT** `/api/v1/doctors/availability/:day`
-- **Example (WAVE)**: 09:00 - 12:00 with 30 min slots (6 slots total, each allowing 5 patients).
-  ```json
-  {
-    "availabilities": [
-      {
-        "scheduleType": "WAVE",
-        "consultingStartTime": "09:00",
-        "consultingEndTime": "12:00",
-        "slotDuration": 30,
-        "maxAppt": 5,
-        "session": "Morning Clinic"
-      }
-    ]
-  }
-  ```
-
-#### 3. Set Custom Date Availability (Hybrid Sync)
-Sets availability for a specific date. **Note**: This will also update the weekly template for that day.
-- **POST** `/api/v1/doctors/custom-availability/:date` (Example: `/2026-03-25`)
-- **Example (STREAM)**: 09:00 - 12:00 with 60 min batches (Total 3 batches, 15 patients).
-  ```json
-  {
-    "availabilities": [
-      {
-        "scheduleType": "STREAM",
-        "consultingStartTime": "09:00",
-        "consultingEndTime": "12:00",
-        "streamInterval": 60,
-        "streamBatchSize": 5,
-        "session": "Morning Stream"
-      }
-    ]
-  }
-  ```
-
-#### 4. Delete Availabilities
-- **DELETE** `/api/v1/doctors/availability/:day` (Delete recurring day)
-- **DELETE** `/api/v1/doctors/custom-availability/:date` (Delete custom date)
-- **DELETE** `/api/v1/doctors/availability/slot/:slotId` (Delete single unit/slot)
+### 📧 Email Notifications
+Automated emails are sent for:
+- ✅ Appointment Confirmation (with Token & Reporting Time)
+- 🔄 Appointment Rescheduling (showing Old vs New time)
+- ❌ Appointment Cancellation (notifying who cancelled)
 
 ---
 
-### 💡 Scheduling Rules:
-- **WAVE**: Requires `slotDuration` and `maxAppt` (Capacity per slot).
-- **STREAM**: Requires `maxAppt` (Capacity per block). Can optionally use `streamInterval` and `streamBatchSize`.
-- **Restrictions**: 
-    - Cannot set availability for past dates.
-    - Cannot set availability for future years (must stay within current year).
-    - URL date must be in `YYYY-MM-DD` format.
+### 💡 Scheduling Logic (WAVE)
+- **Token System**: Every booking gets a token (1, 2, 3...) based on booking order.
+- **Time Distribution**: Slot duration is divided among `maxAppt` to give each patient a dedicated reporting time.
+- **Past Date Guard**: Cannot book, reschedule, or set availability for past dates.
