@@ -6,18 +6,33 @@ export class EmailService {
   private transporter: nodemailer.Transporter | null = null;
 
   constructor() {
-    const host = process.env.EMAIL_HOST;
-    const port = parseInt(process.env.EMAIL_PORT || '587', 10);
-    const user = process.env.EMAIL_USER;
-    const pass = process.env.EMAIL_PASS;
+    const host = process.env.EMAIL_HOST?.trim();
+    const port = parseInt(process.env.EMAIL_PORT?.trim() || '587', 10);
+    const user = process.env.EMAIL_USER?.trim();
+    const pass = process.env.EMAIL_PASS?.trim();
 
     if (host && user && pass) {
+      console.log(`[EmailService] SMTP Initializing: ${host}:${port} (${user})`);
       this.transporter = nodemailer.createTransport({
         host,
         port,
-        secure: port === 465,
+        secure: port === 465, // true for 465, false for other ports
         auth: { user, pass },
+        connectionTimeout: 10000, // 10 seconds
+        greetingTimeout: 10000,
+        socketTimeout: 10000,
       });
+
+      // Verify connection on startup
+      this.transporter.verify((error, success) => {
+        if (error) {
+          console.error('[EmailService] SMTP Verification Failed:', error.message);
+        } else {
+          console.log('[EmailService] SMTP Server is ready to take our messages');
+        }
+      });
+    } else {
+      console.warn('[EmailService] SMTP credentials missing in environment variables. Gmail will not be sent.');
     }
   }
 
@@ -29,26 +44,35 @@ export class EmailService {
       return;
     }
 
-    await this.transporter.sendMail({
-      from,
-      to,
-      subject: "Welcome to Schedula – Let’s Get You Verified!",
-      html: `
-  <div style="font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.7; color: #1f2937; max-width: 600px; margin: auto; padding: 20px;">
-    <h1 style="color: #212525ff; margin-bottom: 10px;">Welcome to Schedula 👋</h1>
-    <p style="font-size: 16px;">We're excited to have you onboard! 🎉 Your smarter scheduling journey officially starts here.</p>
-    <p style="font-size: 16px;">But before we roll out the red carpet… we just need to confirm one thing:</p>
-    <h2 style="color: #16a34a; margin-top: 20px;">Verify Your Email Address</h2>
-    <p style="font-size: 15px;">Click the button below to activate your account. It takes 2 seconds.</p>
-    <div style="text-align: center; margin: 25px 0;">
-      <a href="${verificationLink}" style="display:inline-block; padding:14px 26px; background: linear-gradient(90deg, #2563eb, #1d4ed8); color:#ffffff; text-decoration:none; border-radius:10px; font-weight:600; font-size:16px;">Verify My Email</a>
+    try {
+      await this.transporter.sendMail({
+        from,
+        to,
+        subject: "Welcome to Schedula – Let’s Get You Verified!",
+        html: `
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.7; color: #1f2937; max-width: 600px; margin: auto; padding: 20px;">
+      <h1 style="color: #212525ff; margin-bottom: 10px;">Welcome to Schedula 👋</h1>
+      <p style="font-size: 16px;">We're excited to have you onboard! 🎉 Your smarter scheduling journey officially starts here.</p>
+      <p style="font-size: 16px;">But before we roll out the red carpet… we just need to confirm one thing:</p>
+      <h2 style="color: #16a34a; margin-top: 20px;">Verify Your Email Address</h2>
+      <p style="font-size: 15px;">Click the button below to activate your account. It takes 2 seconds.</p>
+      <div style="text-align: center; margin: 25px 0;">
+        <a href="${verificationLink}" style="display:inline-block; padding:14px 26px; background: linear-gradient(90deg, #2563eb, #1d4ed8); color:#ffffff; text-decoration:none; border-radius:10px; font-weight:600; font-size:16px;">Verify My Email</a>
+      </div>
+      <p style="word-break: break-all; font-size: 14px; color:#2563eb;">${verificationLink}</p>
+      <hr style="margin: 30px 0; border: none; border-top: 1px solid #e5e7eb;" />
+      <p style="margin-top: 25px; font-size: 15px;">See you inside, <br/><strong>Team Schedula </strong></p>
     </div>
-    <p style="word-break: break-all; font-size: 14px; color:#2563eb;">${verificationLink}</p>
-    <hr style="margin: 30px 0; border: none; border-top: 1px solid #e5e7eb;" />
-    <p style="margin-top: 25px; font-size: 15px;">See you inside, <br/><strong>Team Schedula </strong></p>
-  </div>
-`,
-    });
+  `,
+      });
+      console.log(`[Email] Verification email sent successfully to: ${to}`);
+    } catch (error) {
+      console.error(`[Email] Failed to send verification email to: ${to}`, error);
+      // We don't throw here to avoid breaking the signup flow, 
+      // but the user won't be able to verify. 
+      // Actually, it might be better to throw if verification is mandatory.
+      throw error;
+    }
   }
 
   async sendMail(options: { to: string; subject: string; text?: string; html?: string }): Promise<void> {

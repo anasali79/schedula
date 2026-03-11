@@ -94,7 +94,16 @@ export class AuthService {
       });
 
       const verificationLink = `${getApiBaseUrl()}/api/v1/auth/verify-email?token=${token}`;
-      await this.emailService.sendWelcomeVerificationEmail(user.email, verificationLink);
+      console.log(`[AuthService] Attempting to send verification email to ${user.email}...`);
+      
+      try {
+        await this.emailService.sendWelcomeVerificationEmail(user.email, verificationLink);
+        console.log(`[AuthService] Email sent successfully.`);
+      } catch (mailError: any) {
+        console.error(`[AuthService] Email sending failed, but user was created:`, mailError.message);
+        // We continue so the user at least gets the response, 
+        // they can try to resend verification later if needed.
+      }
 
       const tokens = await this.generateTokens(user);
 

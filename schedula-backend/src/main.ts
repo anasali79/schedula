@@ -5,7 +5,10 @@ import dotenv from 'dotenv';
 import { ValidationPipe } from '@nestjs/common';
 import cookieParser from 'cookie-parser';
 
+import dns from 'node:dns';
+
 dotenv.config();
+dns.setDefaultResultOrder('ipv4first');
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
