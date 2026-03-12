@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import * as nodemailer from 'nodemailer';
+import * as dns from 'node:dns';
 
 @Injectable()
 export class EmailService {
@@ -16,15 +17,13 @@ export class EmailService {
       this.transporter = nodemailer.createTransport({
         host: 'smtp.gmail.com',
         port: 465,
-        secure: true, // SSL
+        secure: true,
         auth: { user, pass },
-        pool: true, // Use pooling
-        maxConnections: 5,
-        maxMessages: 100,
-        connectionTimeout: 10000, 
-        greetingTimeout: 10000,
-        socketTimeout: 10000,
-        family: 4, // Force IPv4 to prevent ENETUNREACH on Render
+        connectionTimeout: 10000,
+        // Force DNS to only return IPv4 addresses
+        lookup: (hostname: string, options: any, callback: any) => {
+          dns.lookup(hostname, { family: 4 }, callback);
+        },
       } as any);
     } else {
       console.warn('[EmailService] SMTP credentials missing in environment variables. Emails will not be sent.');
