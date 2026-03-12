@@ -70,11 +70,9 @@ export class AuthService {
 
   // Email Signup
   async signup(dto: SignupDto) {
-    console.log(`[AuthService] Signup initiated for ${dto.email}`);
     const passwordHash = await bcrypt.hash(dto.password, 10);
 
     try {
-      console.log(`[AuthService] Creating user in database...`);
       const user = await this.prisma.user.create({
         data: {
           email: dto.email.toLowerCase(),
@@ -82,7 +80,6 @@ export class AuthService {
           provider: AuthProvider.LOCAL,
         },
       });
-      console.log(`[AuthService] User created with ID: ${user.id}`);
 
       const token = crypto.randomBytes(32).toString('hex');
       const expiresAt = new Date();
@@ -97,15 +94,12 @@ export class AuthService {
       });
 
       const verificationLink = `${getApiBaseUrl()}/api/v1/auth/verify-email?token=${token}`;
-      console.log(`[AuthService] Triggering verification email for ${user.email}...`);
       
-      // Fire and forget, but catch errors to prevent any process issues
+      // Send verification email in the background
       this.emailService.sendWelcomeVerificationEmail(user.email, verificationLink)
         .catch(err => console.error('[AuthService] Background email failed:', err.message));
 
-      console.log(`[AuthService] Generating tokens...`);
       const tokens = await this.generateTokens(user);
-      console.log(`[AuthService] Signup completed successfully.`);
 
       return {
         message: 'Signup successful. Please verify your email.',
