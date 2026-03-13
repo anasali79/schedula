@@ -143,7 +143,7 @@ export class DoctorsService {
           doctorId: doctor.id,
           date: targetDate,
         },
-        include: { slots: true },
+        include: { slots: true, elasticSlots: { include: { allocations: true } } },
         orderBy: { consultingStartTime: 'asc' },
       });
 
@@ -169,7 +169,7 @@ export class DoctorsService {
     // Fallback: use the recurring template (date: null)
     const recurring = await this.prisma.availability.findMany({
       where: { doctorId: doctor.id, date: null },
-      include: { slots: true },
+      include: { slots: true, elasticSlots: { include: { allocations: true } } },
       orderBy: [{ dayOfWeek: 'asc' }, { consultingStartTime: 'asc' }],
     });
 
@@ -198,7 +198,7 @@ export class DoctorsService {
         doctorId: doctor.id,
         date: { not: null, gte: new Date() },
       },
-      include: { slots: true },
+      include: { slots: true, elasticSlots: { include: { allocations: true } } },
       orderBy: [{ date: 'asc' }, { consultingStartTime: 'asc' }],
     });
 
@@ -835,7 +835,7 @@ export class DoctorsService {
 
     const availability = await this.prisma.availability.findFirst({
       where: { id: availabilityId, doctorId: doctor.id },
-      include: { slots: true }
+      include: { slots: true, elasticSlots: { include: { allocations: true } } }
     });
 
     if (!availability) {
@@ -866,30 +866,57 @@ export class DoctorsService {
 
     return { message: 'Slots updated successfully', totalMaxAppt: totalFromSlots };
   }
-
-  private mapAvailability(a: Availability & { slots: AvailabilitySlot[] }, bookedMap: Record<string, number> = {}, dateOverride?: Date | null) {
+  private mapAvailability(a: Availability & { slots: AvailabilitySlot[], elasticSlots?: any[] }, bookedMap: Record<string, number> = {}, dateOverride?: Date | null) {
     const isWave = a.scheduleType === 'WAVE';
     const activeDate = dateOverride || a.date;
     const dateStr = activeDate ? (activeDate instanceof Date ? activeDate.toISOString().split('T')[0] : activeDate) : null;
 
-    const units = a.slots.map((s: AvailabilitySlot) => {
-      const booked = bookedMap[s.id] || 0;
+    // Map Elastic Slots
+    const elasticUnits = (a.elasticSlots || []).filter((es: any) => es.isActive).map((es: any) => {
+      // Find booked count from slotAllocations or directly if stored differently
+      // Let's assume allocations hold current booked for now
+      const booked = es.allocations?.length || 0;
       return {
-        id: s.id,
+        id: es.id,
         date: dateStr,
-        startTime: s.startTime,
-        endTime: s.endTime,
-        maxAppt: s.maxAppt,
+        startTime: es.startTime,
+        endTime: es.endTime,
+        maxAppt: es.maxPerSlot,
         booked,
-        available: Math.max(0, s.maxAppt - booked),
+        available: Math.max(0, es.maxPerSlot - booked),
         display: isWave
-          ? `${this.to12Hour(s.startTime)} to ${this.to12Hour(s.endTime)}`
-          : `${this.to12Hour(s.startTime)} Stream`
+          ? `${this.to12Hour(es.startTime)} to ${this.to12Hour(es.endTime)}`
+          : `${this.to12Hour(es.startTime)} Stream`,
+        isElastic: true
       };
-    }).sort((s1, s2) => this.timeToMinutes(s1.startTime) - this.timeToMinutes(s2.startTime));
+    });
 
-    // For STREAM mode, the booked count is at the availability level
-    const totalBookedForBlock = Object.values(bookedMap).reduce((sum, val) => sum + val, 0);
+    const units = [
+      ...a.slots.map((s: AvailabilitySlot) => {
+        const booked = bookedMap[s.id] || 0;
+        return {
+          id: s.id,
+          date: dateStr,
+          startTime: s.startTime,
+          endTime: s.endTime,
+          maxAppt: s.maxAppt,
+          booked,
+          available: Math.max(0, s.maxAppt - booked),
+          display: isWave
+            ? `${this.to12Hour(s.startTime)} to ${this.to12Hour(s.endTime)}`
+            : `${this.to12Hour(s.startTime)} Stream`,
+          isElastic: false
+        };
+      }),
+      ...elasticUnits
+    ].sort((s1, s2) => this.timeToMinutes(s1.startTime) - this.timeToMinutes(s2.startTime));
+
+    // For STREAM mode
+    // We update maxAppt logic to include elastic maxAppt
+    const elasticMaxAppt = elasticUnits.reduce((sum: number, u: any) => sum + u.maxAppt, 0);
+    const totalMaxAppt = a.maxAppt + elasticMaxAppt;
+
+    const baseBooked = isWave ? units.reduce((sum, u) => sum + u.booked, 0) : (Object.values(bookedMap).reduce((sum, val) => sum + val, 0) + elasticUnits.reduce((sum: number, u: any) => sum + u.booked, 0));
 
     const baseResult: any = {
       id: a.id,
@@ -897,9 +924,9 @@ export class DoctorsService {
       scheduleType: a.scheduleType,
       consultingStartTime: a.consultingStartTime,
       consultingEndTime: a.consultingEndTime,
-      maxAppt: a.maxAppt,
-      booked: isWave ? units.reduce((sum, u) => sum + u.booked, 0) : totalBookedForBlock,
-      available: Math.max(0, a.maxAppt - (isWave ? units.reduce((sum, u) => sum + u.booked, 0) : totalBookedForBlock)),
+      maxAppt: totalMaxAppt,
+      booked: baseBooked,
+      available: Math.max(0, totalMaxAppt - baseBooked),
       session: a.session,
       display: `${this.to12Hour(a.consultingStartTime)} to ${this.to12Hour(a.consultingEndTime)}`,
     };
