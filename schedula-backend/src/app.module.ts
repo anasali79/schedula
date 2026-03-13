@@ -19,4 +19,7 @@ import { ElasticSchedulingModule } from './modules/elastic-scheduling/elastic-sc
   controllers: [],
   providers: [],
 })
-export class AppModule { }
+export class AppModule {}
+
+
+
