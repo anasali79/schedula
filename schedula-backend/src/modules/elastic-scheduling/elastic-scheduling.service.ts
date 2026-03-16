@@ -1,10 +1,14 @@
 import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ExpandSessionDto, ShrinkSessionDto } from './dto/elastic.dto';
+import { EmailService } from '../email/email.service';
 
 @Injectable()
 export class ElasticSchedulingService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly emailService: EmailService
+  ) { }
 
   private timeToMinutes(time: string): number {
     const [h, m] = time.split(':').map(Number);
@@ -15,6 +19,22 @@ export class ElasticSchedulingService {
     const h = Math.floor(minutes / 60).toString().padStart(2, '0');
     const m = (minutes % 60).toString().padStart(2, '0');
     return `${h}:${m}`;
+  }
+
+  private to12Hour(time: string): string {
+    const [h, m] = time.split(':').map(Number);
+    const period = h >= 12 ? 'PM' : 'AM';
+    const hour12 = h % 12 || 12;
+    return `${hour12}:${m.toString().padStart(2, '0')} ${period}`;
+  }
+
+  private calculateReportingTime(startTime: string, endTime: string, maxAppt: number, token: number): string {
+    const start = this.timeToMinutes(startTime);
+    const end = this.timeToMinutes(endTime);
+    const duration = end - start;
+    const offset = Math.floor(((token - 1) * duration) / maxAppt);
+    const reportingMinutes = start + offset;
+    return this.to12Hour(`${Math.floor(reportingMinutes / 60).toString().padStart(2, '0')}:${reportingMinutes % 60}`);
   }
 
   // ═══════════════════════════════════════════════════
@@ -34,7 +54,14 @@ export class ElasticSchedulingService {
     if (!availability.date) throw new BadRequestException('Cannot expand a recurring template. Use custom-availability first.');
 
     const isWave = availability.scheduleType === 'WAVE';
-    const interval = isWave ? availability.slotDuration! : (availability.streamInterval || 15);
+    const isStream = availability.scheduleType === 'STREAM';
+
+    // ─── Special Case: STREAM (Always treat as a single block) ───
+    if (isStream) {
+      return this.handleStreamLongBatchExpand(doctor.id, availability, dto);
+    }
+
+    const interval = availability.slotDuration || 15;
 
     const originalStartMin = this.timeToMinutes(availability.consultingStartTime);
     const originalEndMin = this.timeToMinutes(availability.consultingEndTime);
@@ -118,6 +145,63 @@ export class ElasticSchedulingService {
     };
   }
 
+  // ─── Handle STREAM Expand (Single large block) ───
+  private async handleStreamLongBatchExpand(doctorId: string, availability: any, dto: ExpandSessionDto) {
+    const singleSlot = availability.slots[0];
+    const originalStart = this.timeToMinutes(availability.consultingStartTime);
+    const originalEnd = this.timeToMinutes(availability.consultingEndTime);
+    const newStart = dto.newStartTime ? this.timeToMinutes(dto.newStartTime) : originalStart;
+    const newEnd = dto.newEndTime ? this.timeToMinutes(dto.newEndTime) : originalEnd;
+
+    if (newStart > originalStart || newEnd < originalEnd) {
+      throw new BadRequestException('Expand operation cannot shrink the session.');
+    }
+
+    const currentMax = availability.maxAppt || 0;
+    const newMax = dto.newMaxPerSlot || currentMax;
+    if (newMax < currentMax) throw new BadRequestException('Expand cannot reduce capacity.');
+
+    await this.prisma.$transaction(async (tx) => {
+      // 1. Update the single slot or create if missing
+      if (singleSlot) {
+        await tx.availabilitySlot.update({
+          where: { id: singleSlot.id },
+          data: {
+            startTime: this.minutesToTime(newStart),
+            endTime: this.minutesToTime(newEnd),
+            maxAppt: newMax
+          }
+        });
+      } else {
+        await tx.availabilitySlot.create({
+          data: {
+            availabilityId: availability.id,
+            startTime: this.minutesToTime(newStart),
+            endTime: this.minutesToTime(newEnd),
+            maxAppt: newMax
+          }
+        });
+      }
+
+      // 2. Update availability record
+      await tx.availability.update({
+        where: { id: availability.id },
+        data: {
+          consultingStartTime: this.minutesToTime(newStart),
+          consultingEndTime: this.minutesToTime(newEnd),
+          maxAppt: newMax
+        }
+      });
+    });
+
+    return {
+      scheduleType: availability.scheduleType,
+      message: 'Stream session expanded successfully',
+      newWindow: `${this.minutesToTime(newStart)} - ${this.minutesToTime(newEnd)}`,
+      newMaxAppt: newMax
+    };
+  }
+
   // ═══════════════════════════════════════════════════
   //  SHRINK SESSION — Fully Automatic Cascade
   //  Option A → Move to remaining future slots
@@ -132,7 +216,12 @@ export class ElasticSchedulingService {
       where: { id: dto.availabilityId },
       include: {
         slots: {
-          include: { appointments: { where: { status: 'CONFIRMED' } } },
+          include: { 
+            appointments: { 
+              where: { status: 'CONFIRMED' },
+              include: { patient: { include: { user: true } } }
+            } 
+          },
           orderBy: { startTime: 'asc' as const }
         }
       }
@@ -154,10 +243,17 @@ export class ElasticSchedulingService {
       throw new BadRequestException('New start must be before new end.');
     }
 
-    const slotDuration = availability.slotDuration!;
+    const isWave = availability.scheduleType === 'WAVE';
+    const isStream = availability.scheduleType === 'STREAM';
     const now = new Date();
 
-    // ─── Categorize slots ───
+    // ─── Special Case: STREAM (Always treat as a single block) ───
+    if (isStream) {
+      return this.handleStreamLongBatchShrink(availability, newStart, newEnd, originalStart, originalEnd);
+    }
+
+    // ─── Discrete Slot Logic (WAVE or STREAM with intervals) ───
+    const slotDuration = availability.slotDuration || 15;
     const keptSlots: typeof availability.slots = [];
     const removedSlots: typeof availability.slots = [];
     const affectedAppointments: any[] = [];
@@ -184,7 +280,8 @@ export class ElasticSchedulingService {
 
     // No affected patients → just shrink
     if (affectedAppointments.length === 0) {
-      return this.applyShrink(availability, newStart, newEnd, slotDuration, removedSlots, []);
+      const result = await this.applyShrink(availability, newStart, newEnd, slotDuration, removedSlots, []);
+      return result;
     }
 
     // ─── OPTION A: Fit into remaining future kept slots ───
@@ -205,7 +302,12 @@ export class ElasticSchedulingService {
     if (affectedAppointments.length <= emptySpots) {
       // Option A works! Distribute affected patients into future kept slots
       const moveMap = this.distributeToSlots(affectedAppointments, futureKeptSlots);
-      return this.applyShrink(availability, newStart, newEnd, slotDuration, removedSlots, moveMap);
+      const result = await this.applyShrink(availability, newStart, newEnd, slotDuration, removedSlots, moveMap);
+      
+      // Trigger Emails
+      this.triggerRescheduleEmails(moveMap, availability);
+      
+      return result;
     }
 
     // ─── OPTION B: Reduce slot duration to create more capacity ───
@@ -233,6 +335,10 @@ export class ElasticSchedulingService {
         availability, newStart, newEnd, optimalDuration, maxPerSlot,
         removedSlots, keptSlots, affectedAppointments
       );
+
+      // Trigger Emails for everyone (since duration changed)
+      this.triggerDurationChangeEmails(availability, newStart, newEnd, optimalDuration, maxPerSlot);
+
       return result;
     }
 
@@ -376,11 +482,21 @@ export class ElasticSchedulingService {
       return {
         movedToExistingSlots: moveMapPartial.length,
         rescheduledToOtherSessions: rescheduled.length,
-        addedToQueue: stillLeft.length
+        addedToQueue: stillLeft.length,
+        rescheduledDetails: rescheduled,
+        stillLeftDetails: stillLeft
       };
     });
 
-    // TODO: Send email notifications for rescheduled appointments
+    // ─── Trigger Emails for Option C ───
+    // 1. For Option A moves
+    this.triggerRescheduleEmails(moveMapPartial, availability);
+    
+    // 2. For Option C (other sessions)
+    this.triggerOtherSessionEmails(rescheduled, availability, doctor);
+
+    // 3. For Queue
+    this.triggerQueueEmails(stillLeft, availability, doctor);
 
     return {
       message: 'Session shrunk successfully',
@@ -399,19 +515,34 @@ export class ElasticSchedulingService {
     slots: any[]
   ): { appointmentId: string; fromSlotId: string; toSlotId: string }[] {
     const moves: { appointmentId: string; fromSlotId: string; toSlotId: string }[] = [];
-    let apptIndex = 0;
 
-    for (const slot of slots) {
-      if (apptIndex >= appointments.length) break;
-      const freeSpots = slot.maxAppt - slot.appointments.length;
-      for (let i = 0; i < freeSpots && apptIndex < appointments.length; i++) {
-        moves.push({
-          appointmentId: appointments[apptIndex].id,
-          fromSlotId: appointments[apptIndex].slotId,
-          toSlotId: slot.id
-        });
-        apptIndex++;
+    // Track state for each slot (existing count + patient uniqueness)
+    const slotStates = slots.map(s => ({
+      id: s.id,
+      currentCount: s.appointments.length,
+      maxAppt: s.maxAppt,
+      patientDates: new Set(s.appointments.map((a: any) => `${a.patientId}_${a.appointmentDate.toISOString()}`))
+    }));
+
+    for (const appt of appointments) {
+      const patientKey = `${appt.patientId}_${appt.appointmentDate.toISOString()}`;
+      let assigned = false;
+
+      for (const state of slotStates) {
+        if (state.currentCount < state.maxAppt && !state.patientDates.has(patientKey)) {
+          moves.push({
+            appointmentId: appt.id,
+            fromSlotId: appt.slotId,
+            toSlotId: state.id
+          });
+          state.currentCount++;
+          state.patientDates.add(patientKey);
+          assigned = true;
+          break;
+        }
       }
+      // Note: If an appt can't fit anywhere without violating unique constraint, 
+      // it won't be in 'moves', which is handled by Option C fallback in the caller.
     }
     return moves;
   }
@@ -499,74 +630,99 @@ export class ElasticSchedulingService {
     allAppts.push(...affectedAppointments);
 
     // Generate new slot structure with reduced duration
-    const newSlots: { startTime: string; endTime: string; maxAppt: number }[] = [];
-    let cur = newStart;
-    while (cur + newDuration <= newEnd) {
-      newSlots.push({
-        startTime: this.minutesToTime(cur),
-        endTime: this.minutesToTime(cur + newDuration),
-        maxAppt: maxPerSlot
-      });
-      cur += newDuration;
-    }
+    const oldSlotIds = availability.slots.map((s: any) => s.id);
 
     await this.prisma.$transaction(async (tx) => {
-      // Delete ALL old slots for this availability (we're rebuilding)
-      await tx.availabilitySlot.deleteMany({ where: { availabilityId: availability.id } });
+      // 1. Fetch confirmed appointments inside transaction to ensure we have the latest state
+      const confirmedAppts = await tx.appointment.findMany({
+        where: {
+          slotId: { in: oldSlotIds },
+          status: 'CONFIRMED'
+        },
+        orderBy: { createdAt: 'asc' }
+      });
 
-      // Deactivate elastic slots
+      // 2. Deactivate elastic slots
       await tx.elasticSlot.updateMany({
         where: { availabilityId: availability.id },
         data: { isActive: false }
       });
 
-      // Create new slots
+      // 3. Create new slots
       const createdSlots = [];
-      for (const ns of newSlots) {
+      let cur = newStart;
+      while (cur + newDuration <= newEnd) {
         const created = await tx.availabilitySlot.create({
           data: {
             availabilityId: availability.id,
-            startTime: ns.startTime,
-            endTime: ns.endTime,
-            maxAppt: ns.maxAppt
+            startTime: this.minutesToTime(cur),
+            endTime: this.minutesToTime(cur + newDuration),
+            maxAppt: maxPerSlot
           }
         });
         createdSlots.push(created);
+        cur += newDuration;
       }
 
-      // Redistribute ALL appointments across new slots (earliest first)
-      allAppts.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
-      let slotIdx = 0;
-      let filledInSlot = 0;
+      // 4. Redistribute appointments
+      const slotUsage = createdSlots.map(s => ({
+        id: s.id,
+        fillCount: 0,
+        maxAppt: s.maxAppt,
+        patientDates: new Set<string>()
+      }));
 
-      for (const appt of allAppts) {
-        if (slotIdx >= createdSlots.length) break;
-        await tx.appointment.update({
-          where: { id: appt.id },
-          data: {
-            slotId: createdSlots[slotIdx].id,
-            originalSlotId: appt.slotId,
-            isRescheduled: true
+      for (const appt of confirmedAppts) {
+        const patientKey = `${appt.patientId}_${appt.appointmentDate.toISOString()}`;
+        let assigned = false;
+
+        for (const usage of slotUsage) {
+          if (usage.fillCount < usage.maxAppt && !usage.patientDates.has(patientKey)) {
+            await tx.appointment.update({
+              where: { id: appt.id },
+              data: {
+                slotId: usage.id,
+                originalSlotId: appt.slotId,
+                isRescheduled: true
+              }
+            });
+            usage.fillCount++;
+            usage.patientDates.add(patientKey);
+            assigned = true;
+            break;
           }
-        });
-        filledInSlot++;
-        if (filledInSlot >= maxPerSlot) {
-          slotIdx++;
-          filledInSlot = 0;
+        }
+
+        if (!assigned) {
+          // Failure fallback: Move to queue if they don't fit
+          await tx.rescheduleQueue.create({
+            data: {
+              appointmentId: appt.id,
+              reason: `Slot duration reduced. No space for patient ${appt.patientId} on ${appt.appointmentDate.toISOString()} without violating slot rules.`,
+              priority: 2
+            }
+          });
         }
       }
 
-      // Update availability
+      // 5. Delete old slots safely
+      await tx.availabilitySlot.deleteMany({ 
+        where: { id: { in: oldSlotIds } } 
+      });
+
+      // 6. Update availability record
       await tx.availability.update({
         where: { id: availability.id },
         data: {
           consultingStartTime: this.minutesToTime(newStart),
           consultingEndTime: this.minutesToTime(newEnd),
           slotDuration: newDuration,
-          maxAppt: newSlots.reduce((sum, s) => sum + s.maxAppt, 0)
+          maxAppt: createdSlots.length * maxPerSlot
         }
       });
     });
+
+    const newSlotCount = Math.floor((newEnd - newStart) / newDuration);
 
     return {
       message: `Session shrunk. Slot duration reduced from ${availability.slotDuration} to ${newDuration} mins to accommodate all patients.`,
@@ -577,10 +733,254 @@ export class ElasticSchedulingService {
       newSlotDuration: newDuration,
       affectedAppointments: affectedAppointments.length,
       totalPatients: allAppts.length,
-      newSlotCount: newSlots.length,
+      newSlotCount: newSlotCount,
       movedToExistingSlots: 0,
       rescheduledToOtherSessions: 0,
       addedToQueue: 0
     };
+  }
+
+  // ─── Handle STREAM Long Batch Shrink (Single large slot) ───
+  private async handleStreamLongBatchShrink(
+    availability: any,
+    newStart: number,
+    newEnd: number,
+    originalStart: number,
+    originalEnd: number
+  ) {
+    const singleSlot = availability.slots[0];
+    if (!singleSlot) {
+      // No slot exists? Just update availability
+      await this.prisma.availability.update({
+        where: { id: availability.id },
+        data: {
+          consultingStartTime: this.minutesToTime(newStart),
+          consultingEndTime: this.minutesToTime(newEnd)
+        }
+      });
+      return { message: 'Session shrunk (no slots existed)', strategy: 'STREAM_EMPTY' };
+    }
+
+    const oldDuration = originalEnd - originalStart;
+    const newDuration = newEnd - newStart;
+    const currentMax = availability.maxAppt || 0;
+    
+    // Calculate new capacity proportionally (e.g., 2h -> 1h means 20 -> 10)
+    const newMax = Math.max(1, Math.floor((newDuration / oldDuration) * currentMax));
+    
+    // Sort combined appointments by booking time (First Come First Serve)
+    const allAppts = [...singleSlot.appointments].sort(
+      (a, b) => a.createdAt.getTime() - b.createdAt.getTime()
+    );
+
+    const keptAppts = allAppts.slice(0, newMax);
+    const affectedAppts = allAppts.slice(newMax);
+
+    await this.prisma.$transaction(async (tx) => {
+      // 1. Update the single slot
+      await tx.availabilitySlot.update({
+        where: { id: singleSlot.id },
+        data: {
+          startTime: this.minutesToTime(newStart),
+          endTime: this.minutesToTime(newEnd),
+          maxAppt: newMax
+        }
+      });
+
+      // 2. Move overflow to RescheduleQueue (FCFS)
+      for (const appt of affectedAppts) {
+        await tx.rescheduleQueue.create({
+          data: {
+            appointmentId: appt.id,
+            reason: `Stream session shrunk. Capacity reduced from ${currentMax} to ${newMax}.`,
+            priority: 1
+          }
+        });
+        // Optional: mark appointment as needing attention
+      }
+
+      // 3. Update availability record
+      await tx.availability.update({
+        where: { id: availability.id },
+        data: {
+          consultingStartTime: this.minutesToTime(newStart),
+          consultingEndTime: this.minutesToTime(newEnd),
+          maxAppt: newMax
+        }
+      });
+    });
+
+    // ─── Trigger Emails ───
+    this.triggerStreamInformativeEmails(keptAppts, availability, availability.doctor, newStart, newEnd, newMax);
+    this.triggerQueueEmails(affectedAppts, availability, availability.doctor);
+
+    return {
+      message: `Stream session shrunk. Capacity automatically reduced to ${newMax} based on time reduction.`,
+      strategy: 'STREAM_LONG_BATCH',
+      originalWindow: `${availability.consultingStartTime} - ${availability.consultingEndTime}`,
+      newWindow: `${this.minutesToTime(newStart)} - ${this.minutesToTime(newEnd)}`,
+      originalMaxAppt: currentMax,
+      newMaxAppt: newMax,
+      affectedAppointments: affectedAppts.length,
+      movedToQueue: affectedAppts.length
+    };
+  }
+
+  // ─── Email Trigger Helpers ───
+
+  private async triggerRescheduleEmails(moves: any[], availability: any) {
+    const doctorName = `Dr. ${availability.doctor.firstName}${availability.doctor.lastName ? ' ' + availability.doctor.lastName : ''}`;
+    const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const newDayName = DAY_NAMES[new Date(availability.date!).getUTCDay()];
+
+    for (const move of moves) {
+      const appt = await this.prisma.appointment.findUnique({
+        where: { id: move.appointmentId },
+        include: { patient: { include: { user: true } }, slot: true }
+      });
+      if (!appt) continue;
+
+      const oldSlot = await this.prisma.availabilitySlot.findUnique({ where: { id: move.fromSlotId } });
+      const oldTime = oldSlot ? `${this.to12Hour(oldSlot.startTime)} - ${this.to12Hour(oldSlot.endTime)}` : 'N/A';
+      
+      // Token calculation (simplified for now: order in slot)
+      const token = await this.prisma.appointment.count({
+        where: { slotId: move.toSlotId, appointmentDate: appt.appointmentDate, createdAt: { lt: appt.createdAt }, status: 'CONFIRMED' }
+      }) + 1;
+
+      const reportingTime = this.calculateReportingTime(appt.slot.startTime, appt.slot.endTime, appt.slot.maxAppt, token);
+
+      this.emailService.sendAppointmentReschedule({
+        to: appt.patient.user.email,
+        patientName: `${appt.patient.firstName} ${appt.patient.lastName || ''}`,
+        doctorName,
+        oldDate: new Date(availability.date!).toISOString().split('T')[0],
+        oldSlotTime: oldTime,
+        newDate: new Date(availability.date!).toISOString().split('T')[0],
+        newDay: newDayName,
+        newSlotTime: `${this.to12Hour(appt.slot.startTime)} to ${this.to12Hour(appt.slot.endTime)}`,
+        newReportingTime: reportingTime,
+        token,
+        rescheduledBy: 'Doctor'
+      });
+    }
+  }
+
+  private async triggerDurationChangeEmails(availability: any, newStart: number, newEnd: number, newDuration: number, maxPerSlot: number) {
+    const appts = await this.prisma.appointment.findMany({
+      where: { 
+        slot: { availabilityId: availability.id },
+        appointmentDate: availability.date,
+        status: 'CONFIRMED'
+      },
+      include: { patient: { include: { user: true } }, slot: true },
+      orderBy: { createdAt: 'asc' }
+    });
+
+    const doctorName = `Dr. ${availability.doctor.firstName}${availability.doctor.lastName ? ' ' + availability.doctor.lastName : ''}`;
+    const dateStr = new Date(availability.date!).toISOString().split('T')[0];
+
+    for (const appt of appts) {
+      // Logic for new token and time is handled by the redistribution in Option B
+      // Here we just notify them of their NEW actual assigned slot and reporting time
+      const token = await this.prisma.appointment.count({
+        where: { slotId: appt.slotId, appointmentDate: appt.appointmentDate, createdAt: { lt: appt.createdAt }, status: 'CONFIRMED' }
+      }) + 1;
+
+      const reportingTime = this.calculateReportingTime(appt.slot.startTime, appt.slot.endTime, appt.slot.maxAppt, token);
+
+      this.emailService.sendAppointmentReschedule({
+        to: appt.patient.user.email,
+        patientName: `${appt.patient.firstName} ${appt.patient.lastName || ''}`,
+        doctorName,
+        oldDate: dateStr,
+        oldSlotTime: 'Original Time',
+        newDate: dateStr,
+        newDay: new Date(availability.date!).toLocaleDateString('en-US', { weekday: 'long' }),
+        newSlotTime: `${this.to12Hour(appt.slot.startTime)} to ${this.to12Hour(appt.slot.endTime)}`,
+        newReportingTime: reportingTime,
+        token,
+        rescheduledBy: 'Doctor'
+      });
+    }
+  }
+
+  private async triggerQueueEmails(appts: any[], availability: any, doctor: any) {
+    const doctorName = `Dr. ${doctor.firstName} ${doctor.lastName || ''}`;
+    const dateStr = new Date(availability.date!).toISOString().split('T')[0];
+
+    for (const appt of appts) {
+      const fullAppt = await this.prisma.appointment.findUnique({
+        where: { id: appt.id },
+        include: { patient: { include: { user: true } }, slot: true }
+      });
+      if (!fullAppt) continue;
+
+      this.emailService.sendAppointmentMovedToQueue({
+        to: fullAppt.patient.user.email,
+        patientName: `${fullAppt.patient.firstName} ${fullAppt.patient.lastName || ''}`,
+        doctorName,
+        date: dateStr,
+        oldSlotTime: `${this.to12Hour(fullAppt.slot.startTime)} - ${this.to12Hour(fullAppt.slot.endTime)}`,
+        reason: `Session window shrunk to ${this.minutesToTime(this.timeToMinutes(availability.consultingStartTime))}-${this.minutesToTime(this.timeToMinutes(availability.consultingEndTime))}.`
+      });
+    }
+  }
+
+  private async triggerOtherSessionEmails(moves: any[], availability: any, doctor: any) {
+    const doctorName = `Dr. ${doctor.firstName} ${doctor.lastName || ''}`;
+    const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+    for (const move of moves) {
+      const appt = await this.prisma.appointment.findUnique({
+        where: { id: move.appointmentId },
+        include: { patient: { include: { user: true } }, slot: { include: { availability: true } } }
+      });
+      if (!appt) continue;
+
+      const newDate = new Date(appt.slot.availability.date!);
+      const newDateStr = newDate.toISOString().split('T')[0];
+      const newDay = DAY_NAMES[newDate.getUTCDay()];
+
+      this.emailService.sendAppointmentReschedule({
+        to: appt.patient.user.email,
+        patientName: `${appt.patient.firstName} ${appt.patient.lastName || ''}`,
+        doctorName,
+        oldDate: new Date(availability.date!).toISOString().split('T')[0],
+        oldSlotTime: 'Original Preference',
+        newDate: newDateStr,
+        newDay,
+        newSlotTime: `${this.to12Hour(appt.slot.startTime)} to ${this.to12Hour(appt.slot.endTime)}`,
+        newReportingTime: this.calculateReportingTime(appt.slot.startTime, appt.slot.endTime, appt.slot.maxAppt, 1), // Assuming token 1 for now or calculate actual
+        token: 1, 
+        rescheduledBy: 'Doctor'
+      });
+    }
+  }
+
+  private async triggerStreamInformativeEmails(appts: any[], availability: any, doctor: any, newStart: number, newEnd: number, maxAppt: number) {
+    const doctorName = `Dr. ${doctor.firstName} ${doctor.lastName || ''}`;
+    const dateStr = new Date(availability.date!).toISOString().split('T')[0];
+    const newStartStr = this.minutesToTime(newStart);
+    const newEndStr = this.minutesToTime(newEnd);
+    const newWindow = `${this.to12Hour(newStartStr)} - ${this.to12Hour(newEndStr)}`;
+
+    for (const appt of appts) {
+      // Calculate new reporting time for Stream (staggered)
+      const token = await this.prisma.appointment.count({
+        where: { slotId: appt.slotId, appointmentDate: appt.appointmentDate, createdAt: { lt: appt.createdAt }, status: 'CONFIRMED' }
+      }) + 1;
+
+      const reportingTime = this.calculateReportingTime(newStartStr, newEndStr, maxAppt, token);
+
+      this.emailService.sendInformativeEmail(
+        appt.patient.user.email,
+        'Updated Session Timing - Schedula',
+        'Session Schedule Update',
+        `<p>Hi ${appt.patient.firstName}, please note that your session with <strong>${doctorName}</strong> on <strong>${dateStr}</strong> now has updated timings: <strong>${newWindow}</strong>.</p>
+         <p>Your new reporting time is <strong>${reportingTime}</strong> (Token #${token}). Please arrive accordingly.</p>
+         <p>Your appointment is still confirmed.</p>`
+      );
+    }
   }
 }

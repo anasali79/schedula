@@ -1,9 +1,182 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
 datasource db {
   provider = "postgresql"
 }
 
-generator client {
-  provider = "prisma-client-js"
+model Appointment {
+  id              String            @id @default(uuid())
+  patientId       String
+  doctorId        String
+  slotId          String
+  appointmentDate DateTime
+  status          AppointmentStatus @default(CONFIRMED)
+  notes           String?
+  isRescheduled   Boolean           @default(false)
+  elasticSlotId   String?
+  originalSlotId  String?
+  checkedInAt     DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  doctor          Doctor            @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  patient         Patient           @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  slot            AvailabilitySlot  @relation(fields: [slotId], references: [id], onDelete: Cascade)
+  rescheduleQueue RescheduleQueue?
+  slotAllocation  SlotAllocation?
+
+  @@unique([patientId, appointmentDate, slotId], name: "patient_appointment_unique")
+}
+
+model User {
+  id                 String              @id @default(uuid())
+  email              String              @unique
+  createdAt          DateTime            @default(now())
+  googleId           String?             @unique
+  isVerified         Boolean             @default(false)
+  passwordHash       String?
+  provider           AuthProvider        @default(LOCAL)
+  refreshTokenHash   String?
+  role               Role?
+  updatedAt          DateTime            @updatedAt
+  doctor             Doctor?
+  patient            Patient?
+  verificationTokens VerificationToken[]
+}
+
+model Doctor {
+  id              String           @id @default(uuid())
+  userId          String           @unique
+  firstName       String
+  lastName        String?
+  licenseNumber   String?
+  approvalStatus  ApprovalStatus   @default(PENDING)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  appointments    Appointment[]
+  availabilities  Availability[]
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  elasticSlots    ElasticSlot[]
+  profile         Profile?
+  specializations Specialization[]
+}
+
+model Patient {
+  id           String        @id @default(uuid())
+  userId       String        @unique
+  firstName    String
+  lastName     String?
+  phone        String?
+  dob          DateTime?
+  gender       String?
+  bloodGroup   String?
+  address      String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  appointments Appointment[]
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Profile {
+  id              String   @id @default(uuid())
+  doctorId        String   @unique
+  bio             String?
+  experienceYears Int?
+  consultationFee Decimal? @db.Decimal(10, 2)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  doctor          Doctor   @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+}
+
+model Specialization {
+  id        String   @id @default(uuid())
+  doctorId  String
+  name      String
+  createdAt DateTime @default(now())
+  doctor    Doctor   @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+}
+
+model Availability {
+  id                  String             @id @default(uuid())
+  doctorId            String
+  dayOfWeek           Int?
+  scheduleType        ScheduleType       @default(STREAM)
+  consultingStartTime String
+  consultingEndTime   String
+  maxAppt             Int                @default(0)
+  session             String?
+  slotDuration        Int?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+  date                DateTime?
+  doctor              Doctor             @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  slots               AvailabilitySlot[]
+  elasticSlots        ElasticSlot[]
+}
+
+model AvailabilitySlot {
+  id             String        @id @default(uuid())
+  availabilityId String
+  startTime      String
+  endTime        String
+  maxAppt        Int
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  appointments   Appointment[]
+  availability   Availability  @relation(fields: [availabilityId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  id        String   @id @default(uuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ElasticSlot {
+  id             String           @id @default(uuid())
+  doctorId       String
+  availabilityId String?
+  sessionDate    DateTime
+  startTime      String
+  endTime        String
+  slotDuration   Int
+  maxPerSlot     Int
+  isActive       Boolean          @default(true)
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  availability   Availability?    @relation(fields: [availabilityId], references: [id], onDelete: Cascade)
+  doctor         Doctor           @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  allocations    SlotAllocation[]
+
+  @@index([doctorId, sessionDate])
+}
+
+model SlotAllocation {
+  id            String      @id @default(uuid())
+  elasticSlotId String
+  appointmentId String      @unique
+  status        String
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  elasticSlot   ElasticSlot @relation(fields: [elasticSlotId], references: [id], onDelete: Cascade)
+}
+
+model RescheduleQueue {
+  id            String      @id @default(uuid())
+  appointmentId String      @unique
+  reason        String
+  priority      Int         @default(0)
+  notifiedAt    DateTime?
+  resolvedAt    DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
 }
 
 enum Role {
@@ -28,209 +201,7 @@ enum AppointmentStatus {
   COMPLETED
 }
 
-model Appointment {
-  id              String            @id @default(uuid())
-  patientId       String
-  patient         Patient           @relation(fields: [patientId], references: [id], onDelete: Cascade)
-  doctorId        String
-  doctor          Doctor            @relation(fields: [doctorId], references: [id], onDelete: Cascade)
-  slotId          String
-  slot            AvailabilitySlot  @relation(fields: [slotId], references: [id], onDelete: Cascade)
-  
-  appointmentDate DateTime          // The actual date of the appointment
-  status          AppointmentStatus @default(CONFIRMED)
-  notes           String?
-  isRescheduled   Boolean           @default(false)
-  
-  // Elastic Scheduling enhancements
-  elasticSlotId   String?           // Reference to current active elastic slot
-  originalSlotId  String?           // Preserve original slot ID for audit/revert
-  
-  slotAllocation  SlotAllocation?
-  rescheduleQueue RescheduleQueue?
-
-  checkedInAt     DateTime?
-
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
-
-  @@unique([patientId, appointmentDate, slotId], name: "patient_appointment_unique")
-}
-
-model User {
-  id                 String              @id @default(uuid())
-  email              String              @unique
-  passwordHash       String? // null for Google users
-  role               Role?
-  provider           AuthProvider        @default(LOCAL)
-  isVerified         Boolean             @default(false)
-  googleId           String?             @unique
-  refreshTokenHash   String?
-  createdAt          DateTime            @default(now())
-  updatedAt          DateTime            @updatedAt
-  verificationTokens VerificationToken[]
-  doctor             Doctor?
-  patient            Patient?
-}
-
-model Doctor {
-  id              String           @id @default(uuid())
-  userId          String           @unique
-  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  firstName       String
-  lastName        String?
-  licenseNumber   String?
-  approvalStatus  ApprovalStatus   @default(PENDING)
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
-  profile         Profile?
-  specializations Specialization[]
-  availabilities  Availability[]
-  appointments    Appointment[]
-  elasticSlots    ElasticSlot[]
-}
-
-model Patient {
-  id           String        @id @default(uuid())
-  userId       String        @unique
-  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  firstName    String
-  lastName     String?
-  phone        String?
-  dob          DateTime?
-  gender       String?
-  bloodGroup   String?
-  address      String?
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-  appointments Appointment[]
-}
-
-model Profile {
-  id                String   @id @default(uuid())
-  doctorId          String   @unique
-  doctor            Doctor   @relation(fields: [doctorId], references: [id], onDelete: Cascade)
-  bio               String?
-  experienceYears   Int?
-  consultationFee   Decimal? @db.Decimal(10, 2)
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-}
-
-model Specialization {
-  id        String   @id @default(uuid())
-  doctorId  String
-  doctor    Doctor   @relation(fields: [doctorId], references: [id], onDelete: Cascade)
-  name      String
-  createdAt DateTime @default(now())
-}
-
 enum ScheduleType {
   STREAM
   WAVE
 }
-
-model Availability {
-  id       String @id @default(uuid())
-  doctorId String
-  doctor   Doctor @relation(fields: [doctorId], references: [id], onDelete: Cascade)
-
-  // Day of week (0=Sunday, 1=Monday, ... 6=Saturday) - for Recurring
-  dayOfWeek Int?
-
-  // Specific date - for Custom availability
-  date      DateTime?
-
-  scheduleType ScheduleType @default(STREAM)
-
-  consultingStartTime String
-  consultingEndTime   String
-  maxAppt             Int     @default(0)
-  session             String? // e.g. "Morning", "Evening"
-
-  // WAVE mode fields
-  slotDuration Int? // In minutes
-
-  // STREAM mode fields
-  streamInterval  Int? // In minutes
-  streamBatchSize Int? // Patients per batch/stream
-
-  slots          AvailabilitySlot[]
-  elasticSlots   ElasticSlot[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-model AvailabilitySlot {
-  id             String       @id @default(uuid())
-  availabilityId String
-  availability   Availability @relation(fields: [availabilityId], references: [id], onDelete: Cascade)
-
-  startTime String
-  endTime   String
-  maxAppt   Int // Appointments allowed for this specific slot
-
-  appointments Appointment[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-model VerificationToken {
-  id        String   @id @default(uuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  token     String   @unique
-  expiresAt DateTime
-  used      Boolean  @default(false)
-  createdAt DateTime @default(now())
-}
-
-model ElasticSlot {
-  id             String           @id @default(uuid())
-  doctorId       String
-  doctor         Doctor           @relation(fields: [doctorId], references: [id], onDelete: Cascade)
-  availabilityId String?
-  availability   Availability?    @relation(fields: [availabilityId], references: [id], onDelete: Cascade)
-  sessionDate    DateTime         // The date this elastic slot applies to
-  startTime      String           // HH:mm
-  endTime        String           // HH:mm
-  slotDuration   Int              // In minutes
-  maxPerSlot     Int              // Patient capacity
-  isActive       Boolean          @default(true)
-
-  
-  allocations    SlotAllocation[]
-  
-  createdAt      DateTime         @default(now())
-  updatedAt      DateTime         @updatedAt
-
-  @@index([doctorId, sessionDate])
-}
-
-model SlotAllocation {
-  id            String      @id @default(uuid())
-  elasticSlotId String
-  elasticSlot   ElasticSlot @relation(fields: [elasticSlotId], references: [id], onDelete: Cascade)
-  appointmentId String      @unique
-  appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
-  status        String      // "confirmed", "rescheduled", "bumped"
-  
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
-}
-
-model RescheduleQueue {
-  id            String      @id @default(uuid())
-  appointmentId String      @unique
-  appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
-  reason        String
-  priority      Int         @default(0)
-  notifiedAt    DateTime?
-  resolvedAt    DateTime?
-  
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
-}
-

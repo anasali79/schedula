@@ -129,11 +129,26 @@ export class DoctorsService {
 
     const appointments = await this.prisma.appointment.findMany({
       where: apptWhere,
-      select: { slotId: true }
+      include: { slot: true }
     });
 
     appointments.forEach(a => {
-      bookedMap[a.slotId] = (bookedMap[a.slotId] || 0) + 1;
+      // Primary mapping: by specific AvailabilitySlot ID
+      if (a.slotId) {
+        bookedMap[a.slotId] = (bookedMap[a.slotId] || 0) + 1;
+      }
+
+      // Support Elastic Slot ID mapping
+      if (a.elasticSlotId) {
+        bookedMap[a.elasticSlotId] = (bookedMap[a.elasticSlotId] || 0) + 1;
+      }
+
+      // Secondary mapping: by date + time (to catch appointments booked via templates when looking at real dates, and vice-versa)
+      if (a.slot) {
+        const dateKey = a.appointmentDate.toISOString().split('T')[0];
+        const timeKey = `${dateKey}_${a.slot.startTime}_${a.slot.endTime}`;
+        bookedMap[timeKey] = (bookedMap[timeKey] || 0) + 1;
+      }
     });
 
     // If a specific date is queried, check for a real date record first
@@ -215,12 +230,16 @@ export class DoctorsService {
       weekDate.setUTCDate(today.getUTCDate() + diff);
       const weekDateStr = weekDate.toISOString().split('T')[0];
 
+      const dayRealDates = realDates.filter(rd => (rd.date as Date).toISOString().split('T')[0] === weekDateStr);
+
       return {
         day: this.capitalize(dayName),
         dayOfWeek: index,
         date: weekDateStr,
-        isAvailable: dayAvailabilities.length > 0,
-        availabilities: dayAvailabilities.map((a) => this.mapAvailability(a, {}, weekDate)),
+        isAvailable: dayAvailabilities.length > 0 || dayRealDates.length > 0,
+        availabilities: dayRealDates.length > 0
+          ? dayRealDates.map(rd => this.mapAvailability(rd as any, bookedMap, rd.date))
+          : dayAvailabilities.map((a) => this.mapAvailability(a, bookedMap, weekDate)),
       };
     });
 
@@ -379,23 +398,6 @@ export class DoctorsService {
   }
 
 
-  private generateStreamBatches(startMinutes: number, endMinutes: number, interval: number, batchSize: number) {
-    const batches: { startTime: string; endTime: string; maxAppt: number }[] = [];
-    let current = startMinutes;
-
-    while (current < endMinutes) {
-      const next = current + interval;
-      if (next > endMinutes) break;
-
-      batches.push({
-        startTime: this.minutesToTime(current),
-        endTime: this.minutesToTime(next),
-        maxAppt: batchSize,
-      });
-      current = next;
-    }
-    return batches;
-  }
 
   private minutesToTime(minutes: number): string {
     const h = Math.floor(minutes / 60).toString().padStart(2, '0');
@@ -439,12 +441,6 @@ export class DoctorsService {
 
       if (config.scheduleType === 'STREAM') {
         if (!config.maxAppt) throw new BadRequestException('maxAppt is required for STREAM scheduling');
-        if (config.streamInterval) {
-          if (diff % config.streamInterval !== 0) {
-            throw new BadRequestException(`streamInterval (${config.streamInterval} min) must perfectly divide the time range (${diff} min)`);
-          }
-          if (!config.streamBatchSize) throw new BadRequestException('streamBatchSize is required when streamInterval is provided');
-        }
       } else if (config.scheduleType === 'WAVE') {
         if (!config.slotDuration) throw new BadRequestException('slotDuration is required for WAVE scheduling');
 
@@ -510,16 +506,12 @@ export class DoctorsService {
               slotDuration: config.slotDuration!,
               totalMaxAppt: config.maxAppt,
             }).slots
-          : config.streamInterval
-            ? this.generateStreamBatches(start, end, config.streamInterval!, config.streamBatchSize!)
-            : [{ startTime: config.consultingStartTime, endTime: config.consultingEndTime, maxAppt: config.maxAppt! }];
+          : [{ startTime: config.consultingStartTime, endTime: config.consultingEndTime, maxAppt: config.maxAppt! }];
 
         const unitsForTemplate = getUnits();
         const totalMaxAppt = isWave
           ? unitsForTemplate.reduce((sum: number, u: any) => sum + u.maxAppt, 0)
-          : config.streamInterval
-            ? unitsForTemplate.reduce((sum: number, u: any) => sum + u.maxAppt, 0)
-            : config.maxAppt!;
+          : config.maxAppt!;
 
         // 1. Create the base template (date: null)
         await tx.availability.create({
@@ -533,8 +525,6 @@ export class DoctorsService {
             maxAppt: totalMaxAppt,
             session: config.session || null,
             slotDuration: isWave ? config.slotDuration : null,
-            streamInterval: config.scheduleType === 'STREAM' ? config.streamInterval : null,
-            streamBatchSize: config.scheduleType === 'STREAM' ? config.streamBatchSize : null,
             slots: { create: unitsForTemplate },
           },
         });
@@ -553,8 +543,6 @@ export class DoctorsService {
               maxAppt: totalMaxAppt,
               session: config.session || null,
               slotDuration: isWave ? config.slotDuration : null,
-              streamInterval: config.scheduleType === 'STREAM' ? config.streamInterval : null,
-              streamBatchSize: config.scheduleType === 'STREAM' ? config.streamBatchSize : null,
               slots: { create: expectedUnits },
             },
           });
@@ -612,16 +600,12 @@ export class DoctorsService {
                 slotDuration: config.slotDuration!,
                 totalMaxAppt: config.maxAppt,
               }).slots
-            : config.streamInterval
-              ? this.generateStreamBatches(start, end, config.streamInterval!, config.streamBatchSize!)
-              : [{ startTime: config.consultingStartTime, endTime: config.consultingEndTime, maxAppt: config.maxAppt! }];
+            : [{ startTime: config.consultingStartTime, endTime: config.consultingEndTime, maxAppt: config.maxAppt! }];
 
           const unitsForTemplate = getUnits();
           const totalMaxAppt = isWave
             ? unitsForTemplate.reduce((sum: number, u: any) => sum + u.maxAppt, 0)
-            : config.streamInterval
-              ? unitsForTemplate.reduce((sum: number, u: any) => sum + u.maxAppt, 0)
-              : config.maxAppt!;
+            : config.maxAppt!;
 
           // 1. Base template
           await tx.availability.create({
@@ -635,8 +619,6 @@ export class DoctorsService {
               maxAppt: totalMaxAppt,
               session: config.session || null,
               slotDuration: isWave ? config.slotDuration : null,
-              streamInterval: config.scheduleType === 'STREAM' ? config.streamInterval : null,
-              streamBatchSize: config.scheduleType === 'STREAM' ? config.streamBatchSize : null,
               slots: { create: unitsForTemplate },
             },
           });
@@ -655,8 +637,6 @@ export class DoctorsService {
                 maxAppt: totalMaxAppt,
                 session: config.session || null,
                 slotDuration: isWave ? config.slotDuration : null,
-                streamInterval: config.scheduleType === 'STREAM' ? config.streamInterval : null,
-                streamBatchSize: config.scheduleType === 'STREAM' ? config.streamBatchSize : null,
                 slots: { create: expectedUnits },
               },
             });
@@ -726,15 +706,11 @@ export class DoctorsService {
               slotDuration: config.slotDuration!,
               totalMaxAppt: config.maxAppt,
             }).slots
-          : config.streamInterval
-            ? this.generateStreamBatches(start, end, config.streamInterval!, config.streamBatchSize!)
-            : [{ startTime: config.consultingStartTime, endTime: config.consultingEndTime, maxAppt: config.maxAppt! }];
+          : [{ startTime: config.consultingStartTime, endTime: config.consultingEndTime, maxAppt: config.maxAppt! }];
 
         const totalMaxAppt = isWave
           ? units.reduce((sum: number, u: any) => sum + u.maxAppt, 0)
-          : config.streamInterval
-            ? units.reduce((sum: number, u: any) => sum + u.maxAppt, 0)
-            : config.maxAppt!;
+          : config.maxAppt!;
 
         // Create record for THIS date only
         await tx.availability.create({
@@ -748,8 +724,6 @@ export class DoctorsService {
             maxAppt: totalMaxAppt,
             session: config.session || null,
             slotDuration: isWave ? config.slotDuration : null,
-            streamInterval: config.scheduleType === 'STREAM' ? config.streamInterval : null,
-            streamBatchSize: config.scheduleType === 'STREAM' ? config.streamBatchSize : null,
             slots: { create: units },
           },
         });
@@ -873,9 +847,9 @@ export class DoctorsService {
 
     // Map Elastic Slots
     const elasticUnits = (a.elasticSlots || []).filter((es: any) => es.isActive).map((es: any) => {
-      // Find booked count from slotAllocations or directly if stored differently
-      // Let's assume allocations hold current booked for now
-      const booked = es.allocations?.length || 0;
+      const timeKey = dateStr ? `${dateStr}_${es.startTime}_${es.endTime}` : null;
+      // Use bookedMap if available, fallback to allocations count for legacy support
+      const booked = bookedMap[es.id] || (timeKey ? bookedMap[timeKey] : 0) || es.allocations?.length || 0;
       return {
         id: es.id,
         date: dateStr,
@@ -884,16 +858,15 @@ export class DoctorsService {
         maxAppt: es.maxPerSlot,
         booked,
         available: Math.max(0, es.maxPerSlot - booked),
-        display: isWave
-          ? `${this.to12Hour(es.startTime)} to ${this.to12Hour(es.endTime)}`
-          : `${this.to12Hour(es.startTime)} Stream`,
+        display: `${this.to12Hour(es.startTime)} to ${this.to12Hour(es.endTime)}`,
         isElastic: true
       };
     });
 
     const units = [
       ...a.slots.map((s: AvailabilitySlot) => {
-        const booked = bookedMap[s.id] || 0;
+        const timeKey = dateStr ? `${dateStr}_${s.startTime}_${s.endTime}` : null;
+        const booked = bookedMap[s.id] || (timeKey ? bookedMap[timeKey] : 0) || 0;
         return {
           id: s.id,
           date: dateStr,
@@ -902,9 +875,7 @@ export class DoctorsService {
           maxAppt: s.maxAppt,
           booked,
           available: Math.max(0, s.maxAppt - booked),
-          display: isWave
-            ? `${this.to12Hour(s.startTime)} to ${this.to12Hour(s.endTime)}`
-            : `${this.to12Hour(s.startTime)} Stream`,
+          display: `${this.to12Hour(s.startTime)} to ${this.to12Hour(s.endTime)}`,
           isElastic: false
         };
       }),
@@ -916,7 +887,7 @@ export class DoctorsService {
     const elasticMaxAppt = elasticUnits.reduce((sum: number, u: any) => sum + u.maxAppt, 0);
     const totalMaxAppt = a.maxAppt + elasticMaxAppt;
 
-    const baseBooked = isWave ? units.reduce((sum, u) => sum + u.booked, 0) : (Object.values(bookedMap).reduce((sum, val) => sum + val, 0) + elasticUnits.reduce((sum: number, u: any) => sum + u.booked, 0));
+    const baseBooked = units.reduce((sum, u) => sum + u.booked, 0);
 
     const baseResult: any = {
       id: a.id,
@@ -931,17 +902,10 @@ export class DoctorsService {
       display: `${this.to12Hour(a.consultingStartTime)} to ${this.to12Hour(a.consultingEndTime)}`,
     };
 
-    if (isWave) {
-      return {
-        ...baseResult,
-        slotDuration: a.slotDuration,
-        generatedSlots: units,
-      };
-    } else {
-      return {
-        ...baseResult,
-        slotDuration: null,
-      };
-    }
+    return {
+      ...baseResult,
+      slotDuration: isWave ? a.slotDuration : null,
+      generatedSlots: units,
+    };
   }
 }

@@ -91,16 +91,6 @@ export class AvailabilityConfigDto {
     slotDuration?: number; // Only for WAVE
 
     @IsOptional()
-    @IsInt()
-    @Min(1)
-    streamInterval?: number; // Only for STREAM
-
-    @IsOptional()
-    @IsInt()
-    @Min(1)
-    streamBatchSize?: number; // Only for STREAM
-
-    @IsOptional()
     @IsArray()
     @ValidateNested({ each: true })
     @Type(() => WaveSlotDto)
