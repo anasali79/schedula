@@ -4,11 +4,14 @@
   "description": "NestJS boilerplate with Hello World endpoint",
   "main": "dist/main.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "npx prisma generate && tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "start:dev": "ts-node-dev --respawn --transpile-only src/main.ts",
     "start:prod": "node dist/main.js",
-    "postinstall": "prisma generate"
+    "postinstall": "npx prisma generate"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   },
   "dependencies": {
     "@nestjs/common": "^10.3.0",
@@ -19,29 +22,31 @@
     "@nestjs/platform-express": "^11.1.14",
     "@prisma/adapter-pg": "^7.4.2",
     "@prisma/client": "^7.4.2",
-    "bcrypt": "^6.0.0",
-    "class-transformer": "^0.5.1",
-    "class-validator": "^0.15.1",
-    "cookie-parser": "^1.4.7",
-    "nodemailer": "^8.0.1",
-    "passport": "^0.7.0",
-    "passport-google-oauth20": "^2.0.0",
-    "passport-jwt": "^4.0.1",
-    "pg": "^8.19.0",
-    "@nestjs/platform-express": "^11.1.14",
-    "reflect-metadata": "^0.2.1",
-    "rxjs": "^7.8.1"
-  },
-  "devDependencies": {
     "@types/bcrypt": "^6.0.0",
     "@types/cookie-parser": "^1.4.10",
+    "@types/express": "^5.0.6",
     "@types/node": "^25.3.3",
     "@types/nodemailer": "^7.0.11",
     "@types/passport-google-oauth20": "^2.0.17",
     "@types/passport-jwt": "^4.0.1",
     "@types/pg": "^8.18.0",
+    "bcrypt": "^6.0.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
+    "cookie-parser": "^1.4.7",
     "dotenv": "^17.3.1",
+    "nodemailer": "^8.0.1",
+    "passport": "^0.7.0",
+    "passport-google-oauth20": "^2.0.0",
+    "passport-jwt": "^4.0.1",
+    "pg": "^8.19.0",
     "prisma": "^7.4.2",
+    "@nestjs/platform-express": "^11.1.14",
+    "reflect-metadata": "^0.2.1",
+    "rxjs": "^7.8.1",
+    "sib-api-v3-sdk": "^8.5.0"
+  },
+  "devDependencies": {
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.6.0"
   }

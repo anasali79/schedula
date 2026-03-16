@@ -1,71 +1,112 @@
 import { Injectable } from '@nestjs/common';
-import * as nodemailer from 'nodemailer';
+const SibApiV3Sdk = require('sib-api-v3-sdk');
 
 @Injectable()
 export class EmailService {
-  private transporter: nodemailer.Transporter | null = null;
+  private apiInstance: any;
+  private primaryColor = '#2563eb';
+  private accentColor = '#3b82f6';
+  private textColor = '#1f2937';
+  private lightTextColor = '#6b7280';
+  private bgColor = '#f9fafb';
 
   constructor() {
-    const host = process.env.EMAIL_HOST;
-    const port = parseInt(process.env.EMAIL_PORT || '587', 10);
-    const user = process.env.EMAIL_USER;
-    const pass = process.env.EMAIL_PASS;
+    const apiKey = process.env.BREVO_API_KEY || process.env.EMAIL_PASS?.trim();
+    if (apiKey) {
+      console.log('[EmailService] Initializing Brevo (sib-api-v3-sdk)');
+      const defaultClient = SibApiV3Sdk.ApiClient.instance;
+      const apiKeyInstance = defaultClient.authentications['api-key'];
+      apiKeyInstance.apiKey = apiKey;
+      this.apiInstance = new SibApiV3Sdk.TransactionalEmailsApi();
+    } else {
+      console.warn('[EmailService] Brevo API key missing (BREVO_API_KEY or EMAIL_PASS).');
+    }
+  }
 
-    if (host && user && pass) {
-      this.transporter = nodemailer.createTransport({
-        host,
-        port,
-        secure: port === 465,
-        auth: { user, pass },
-      });
+  private wrapLayout(title: string, content: string): string {
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>${title}</title>
+      </head>
+      <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: ${this.bgColor}; color: ${this.textColor}; -webkit-font-smoothing: antialiased;">
+        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="table-layout: fixed;">
+          <tr>
+            <td align="center" style="padding: 40px 10px;">
+              <table border="0" cellpadding="0" cellspacing="0" width="600" style="background-color: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);">
+                <!-- Header -->
+                <tr>
+                  <td align="center" style="padding: 40px 0; background: linear-gradient(135deg, ${this.primaryColor}, ${this.accentColor});">
+                    <h1 style="color: #ffffff; margin: 0; font-size: 32px; font-weight: 800; letter-spacing: -0.05em;">Schedula</h1>
+                    <p style="color: rgba(255, 255, 255, 0.8); margin-top: 8px; font-size: 14px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.1em;">Health Care. Simplified.</p>
+                  </td>
+                </tr>
+                <!-- Content -->
+                <tr>
+                  <td style="padding: 40px 50px;">
+                    ${content}
+                  </td>
+                </tr>
+                <!-- Footer -->
+                <tr>
+                  <td style="padding: 30px 50px; background-color: #f3f4f6; border-top: 1px solid #e5e7eb; text-align: center;">
+                    <p style="margin: 0; font-size: 14px; color: ${this.lightTextColor};">&copy; ${new Date().getFullYear()} Schedula. All rights reserved.</p>
+                    <div style="margin-top: 15px;">
+                       <p style="margin: 0; font-size: 12px; color: #9ca3af;">You're receiving this because you're a valued member of Schedula.</p>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+      </html>
+    `;
+  }
+
+  private async sendBrevoEmail(to: string, subject: string, htmlContent: string): Promise<void> {
+    if (!this.apiInstance) return;
+
+    const fromEmail = process.env.EMAIL_USER || 'noreply@schedula.com';
+    const fromName = 'Schedula';
+
+    const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+    sendSmtpEmail.subject = subject;
+    sendSmtpEmail.htmlContent = htmlContent;
+    sendSmtpEmail.sender = { name: fromName, email: fromEmail };
+    sendSmtpEmail.to = [{ email: to }];
+
+    try {
+      await this.apiInstance.sendTransacEmail(sendSmtpEmail);
+      console.log(`[Email] Email sent via Brevo to: ${to}`);
+    } catch (error: any) {
+      console.error(`[Email] Brevo Error for ${to}:`, error.message);
     }
   }
 
   async sendWelcomeVerificationEmail(to: string, verificationLink: string): Promise<void> {
-    const from = process.env.EMAIL_FROM || process.env.EMAIL_USER || 'noreply@schedula.com';
+    const content = `
+      <h2 style="margin-top: 0; color: #111827; font-size: 24px; font-weight: 700;">Welcome to Schedula 👋</h2>
+      <p style="font-size: 16px; color: #4b5563; line-height: 1.6;">We're thrilled to have you here! Your journey to a smoother healthcare experience starts with just one small step.</p>
+      <div style="margin: 32px 0; padding: 24px; background-color: #eff6ff; border-radius: 12px; border: 1px solid #dbeafe; text-align: center;">
+        <h3 style="margin-top: 0; color: #1e40af; font-size: 18px;">Verify Your Email</h3>
+        <p style="color: #60a5fa; font-size: 14px; margin-bottom: 24px;">Please click the button below to secure your account.</p>
+        <a href="${verificationLink}" style="display: inline-block; padding: 14px 32px; background-color: ${this.primaryColor}; color: #ffffff; text-decoration: none; border-radius: 10px; font-weight: 600; font-size: 16px; box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.2);">Confirm Identity</a>
+      </div>
+      <p style="font-size: 14px; color: #9ca3af; text-align: center;">If the button doesn't work, copy and paste this link into your browser:</p>
+      <p style="font-size: 12px; color: #3b82f6; word-break: break-all; text-align: center; margin-top: 8px;">${verificationLink}</p>
+    `;
 
-    if (!this.transporter) {
-      console.warn('[Email] SMTP not configured. Would send verification to:', to, 'Link:', verificationLink);
-      return;
-    }
-
-    await this.transporter.sendMail({
-      from,
-      to,
-      subject: "Welcome to Schedula – Let’s Get You Verified!",
-      html: `
-  <div style="font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.7; color: #1f2937; max-width: 600px; margin: auto; padding: 20px;">
-    <h1 style="color: #212525ff; margin-bottom: 10px;">Welcome to Schedula 👋</h1>
-    <p style="font-size: 16px;">We're excited to have you onboard! 🎉 Your smarter scheduling journey officially starts here.</p>
-    <p style="font-size: 16px;">But before we roll out the red carpet… we just need to confirm one thing:</p>
-    <h2 style="color: #16a34a; margin-top: 20px;">Verify Your Email Address</h2>
-    <p style="font-size: 15px;">Click the button below to activate your account. It takes 2 seconds.</p>
-    <div style="text-align: center; margin: 25px 0;">
-      <a href="${verificationLink}" style="display:inline-block; padding:14px 26px; background: linear-gradient(90deg, #2563eb, #1d4ed8); color:#ffffff; text-decoration:none; border-radius:10px; font-weight:600; font-size:16px;">Verify My Email</a>
-    </div>
-    <p style="word-break: break-all; font-size: 14px; color:#2563eb;">${verificationLink}</p>
-    <hr style="margin: 30px 0; border: none; border-top: 1px solid #e5e7eb;" />
-    <p style="margin-top: 25px; font-size: 15px;">See you inside, <br/><strong>Team Schedula </strong></p>
-  </div>
-`,
-    });
+    await this.sendBrevoEmail(to, "Verify your email - Schedula", this.wrapLayout('Welcome to Schedula', content));
   }
 
   async sendMail(options: { to: string; subject: string; text?: string; html?: string }): Promise<void> {
-    const from = process.env.EMAIL_FROM || process.env.EMAIL_USER || 'noreply@schedula.com';
-
-    if (!this.transporter) {
-      console.warn('[Email] SMTP not configured. Would send email to:', options.to, 'Subject:', options.subject);
-      return;
-    }
-
-    await this.transporter.sendMail({
-      from,
-      to: options.to,
-      subject: options.subject,
-      text: options.text,
-      html: options.html,
-    });
+    const html = options.html ? this.wrapLayout(options.subject, options.html) : (options.text || '');
+    await this.sendBrevoEmail(options.to, options.subject, html);
   }
 
   async sendAppointmentConfirmation(data: {
@@ -77,96 +118,81 @@ export class EmailService {
     slotTime: string;
     token: number;
     reportingTime: string;
-    appointmentId: string;
+    appointmentId?: string;
     notes?: string;
   }): Promise<void> {
-    const from = process.env.EMAIL_FROM || process.env.EMAIL_USER || 'noreply@schedula.com';
+    const { patientName, doctorName, date, day, slotTime, token, reportingTime, notes } = data;
 
-    if (!this.transporter) {
-      console.warn('[Email] SMTP not configured. Appointment confirmation for:', data.to);
-      return;
-    }
+    const content = `
+      <h2 style="margin-top: 0; color: #111827; font-size: 24px; font-weight: 700;">Appointment Confirmed! ✅</h2>
+      <p style="font-size: 16px; color: #4b5563; margin-bottom: 24px;">Hi <strong>${patientName}</strong>, your visit with <strong>${doctorName}</strong> is confirmed. Here's your appointment card:</p>
+      
+      <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 16px; padding: 32px; margin-bottom: 24px;">
+        <table width="100%" border="0" cellpadding="0" cellspacing="0">
+          <tr>
+            <td style="padding-bottom: 24px;">
+              <p style="margin: 0; font-size: 12px; text-transform: uppercase; color: #64748b; font-weight: 700; letter-spacing: 0.1em;">Doctor</p>
+              <p style="margin: 4px 0 0; font-size: 18px; color: #1e293b; font-weight: 700;">${doctorName}</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding-bottom: 24px;">
+              <p style="margin: 0; font-size: 12px; text-transform: uppercase; color: #64748b; font-weight: 700; letter-spacing: 0.1em;">Date & Time</p>
+              <p style="margin: 4px 0 0; font-size: 18px; color: #1e293b; font-weight: 600;">${day}, ${date} @ ${slotTime}</p>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <table width="100%" border="0" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td width="55%">
+                    <p style="margin: 0; font-size: 12px; text-transform: uppercase; color: #64748b; font-weight: 700; letter-spacing: 0.1em;">Reporting Time</p>
+                    <p style="margin: 4px 0 0; font-size: 18px; color: #1e293b; font-weight: 700;">${reportingTime}</p>
+                  </td>
+                  <td width="45%" style="text-align: right;">
+                    <div style="display: inline-block; background-color: #2563eb; color: #ffffff; padding: 10px 20px; border-radius: 12px;">
+                      <p style="margin: 0; font-size: 10px; text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em; opacity: 0.9;">Token</p>
+                      <p style="margin: 0; font-size: 24px; font-weight: 800;">#${token}</p>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </div>
+      
+      ${notes ? `
+      <div style="margin-bottom: 24px;">
+        <p style="margin: 0; font-size: 12px; text-transform: uppercase; color: #64748b; font-weight: 700; letter-spacing: 0.1em;">Notes</p>
+        <p style="margin: 4px 0 0; font-size: 14px; color: #4b5563; line-height: 1.5;">${notes}</p>
+      </div>` : ''}
 
-    const { patientName, doctorName, date, day, slotTime, token, reportingTime, appointmentId, notes } = data;
+      <div style="background-color: #fffbeb; border: 1px solid #fef3c7; border-radius: 12px; padding: 16px; margin-bottom: 24px;">
+        <p style="margin: 0; font-size: 14px; color: #92400e;">
+          <strong>Important:</strong> Please arrive at the reporting time to confirm your presence at the clinic.
+        </p>
+      </div>
 
-    await this.transporter.sendMail({
-      from,
-      to: data.to,
-      subject: '✅ Appointment Confirmed - Schedula',
-      html: `
-        <div style="font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #1f2937; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #e5e7eb; border-radius: 12px;">
-          <h2 style="color: #16a34a; margin-top: 0;">Appointment Confirmed! ✅</h2>
-          <p>Hello <strong>${patientName}</strong>,</p>
-          <p>Your appointment with <strong>${doctorName}</strong> has been successfully booked and confirmed.</p>
-          
-          <div style="background-color: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
-            <h3 style="margin-top: 0; font-size: 16px; color: #374151; border-bottom: 1px solid #e5e7eb; padding-bottom: 10px;">📋 Appointment Summary</h3>
-            <table style="width: 100%; border-collapse: collapse;">
-              <tr>
-                <td style="padding: 8px 0; color: #6b7280; width: 140px;">Date:</td>
-                <td style="padding: 8px 0; font-weight: 600;">${day}, ${date}</td>
-              </tr>
-              <tr>
-                <td style="padding: 8px 0; color: #6b7280;">Slot Time:</td>
-                <td style="padding: 8px 0; font-weight: 600;">${slotTime}</td>
-              </tr>
-              <tr>
-                <td style="padding: 8px 0; color: #6b7280;">Token Number:</td>
-                <td style="padding: 8px 0; font-weight: 600; color: #2563eb; font-size: 18px;">#${token}</td>
-              </tr>
-              <tr>
-                <td style="padding: 8px 0; color: #6b7280;">Reporting Time:</td>
-                <td style="padding: 8px 0; font-weight: 600;">${reportingTime}</td>
-              </tr>
-              <tr>
-                <td style="padding: 8px 0; color: #6b7280;">Reference ID:</td>
-                <td style="padding: 8px 0; font-family: monospace; font-size: 12px;">${appointmentId}</td>
-              </tr>
-              ${notes ? `
-              <tr>
-                <td style="padding: 8px 0; color: #6b7280;">Notes:</td>
-                <td style="padding: 8px 0; font-style: italic;">${notes}</td>
-              </tr>` : ''}
-            </table>
-          </div>
+      <div style="text-align: center; margin-top: 32px;">
+        <a href="#" style="background-color: #f3f4f6; color: #374151; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 14px; display: inline-block; border: 1px solid #e5e7eb;">View All Appointments</a>
+      </div>
+    `;
 
-          <p style="font-size: 14px; color: #6b7280;">Please arrive at the clinic at least 10 minutes before your reporting time.</p>
-          
-          <p style="margin-top: 30px; border-top: 1px solid #e5e7eb; padding-top: 20px;">
-            Best Regards,<br/>
-            <strong>Team Schedula</strong>
-          </p>
-        </div>
-      `,
-    });
+    await this.sendBrevoEmail(data.to, 'Appointment Confirmed - Schedula', this.wrapLayout('Appointment Confirmation', content));
   }
 
   async sendGoogleWelcomeEmail(to: string): Promise<void> {
-    const from = process.env.EMAIL_FROM || process.env.EMAIL_USER || 'noreply@schedula.com';
+    const content = `
+      <h2 style="margin-top: 0; color: #111827; font-size: 24px; font-weight: 700;">Google Signup Successful 🚀</h2>
+      <p style="font-size: 16px; color: #4b5563; line-height: 1.6;">Welcome to the Schedula family! We've successfully linked your Google account.</p>
+      <p style="font-size: 16px; color: #4b5563; line-height: 1.6;">You can now book appointments, track your medical history, and manage your health with ease.</p>
+      <div style="margin-top: 32px; text-align: center;">
+        <a href="#" style="background-color: ${this.primaryColor}; color: #ffffff; padding: 14px 32px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 16px;">Go to Dashboard</a>
+      </div>
+    `;
 
-    if (!this.transporter) {
-      console.warn('[Email] SMTP not configured. Google Welcome to:', to);
-      return;
-    }
-
-    await this.transporter.sendMail({
-      from,
-      to,
-      subject: "Welcome to Schedula! 🚀",
-      html: `
-        <div style="font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.7; color: #1f2937; max-width: 600px; margin: auto; padding: 20px;">
-          <h1 style="color: #212525ff; margin-bottom: 10px;">Signup Successful! 🎉</h1>
-          <p style="font-size: 16px;">Hello,</p>
-          <p style="font-size: 16px;">Welcome to Schedula! You have successfully signed up using your Google account.</p>
-          <p style="font-size: 16px; color: #16a34a; font-weight: 600;">Your account is automatically verified and ready to use.</p>
-          <p style="font-size: 16px;">You can now onboard as a Patient or a Doctor to start scheduling.</p>
-          <div style="text-align: center; margin: 30px 0;">
-            <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}" style="display:inline-block; padding:14px 26px; background: #2563eb; color:#ffffff; text-decoration:none; border-radius:10px; font-weight:600;">Go to Dashboard</a>
-          </div>
-          <p style="margin-top: 25px; font-size: 15px;">Best,<br/><strong>Team Schedula</strong></p>
-        </div>
-      `,
-    });
+    await this.sendBrevoEmail(to, "Welcome to Schedula! 🚀", this.wrapLayout('Welcome to Schedula', content));
   }
 
   async sendAppointmentCancellation(data: {
@@ -177,48 +203,28 @@ export class EmailService {
     slotTime: string;
     cancelledBy: 'Patient' | 'Doctor';
   }): Promise<void> {
-    const from = process.env.EMAIL_FROM || process.env.EMAIL_USER || 'noreply@schedula.com';
-
-    if (!this.transporter) {
-      console.warn('[Email] SMTP not configured. Cancellation notice for:', data.to);
-      return;
-    }
-
     const { patientName, doctorName, date, slotTime, cancelledBy } = data;
 
-    await this.transporter.sendMail({
-      from,
-      to: data.to,
-      subject: '❌ Appointment Cancelled - Schedula',
-      html: `
-        <div style="font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #1f2937; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #e5e7eb; border-radius: 12px;">
-          <h2 style="color: #dc2626; margin-top: 0;">Appointment Cancelled ❌</h2>
-          <p>Hello,</p>
-          <p>The appointment between <strong>${patientName}</strong> and <strong>${doctorName}</strong> has been cancelled by the <strong>${cancelledBy}</strong>.</p>
-          
-          <div style="background-color: #fef2f2; padding: 20px; border-radius: 8px; margin: 20px 0; border: 1px solid #fee2e2;">
-            <h3 style="margin-top: 0; font-size: 16px; color: #991b1b; border-bottom: 1px solid #fee2e2; padding-bottom: 10px;">📅 Cancelled Appointment Details</h3>
-            <table style="width: 100%; border-collapse: collapse;">
-              <tr>
-                <td style="padding: 8px 0; color: #b91c1c; width: 140px;">Date:</td>
-                <td style="padding: 8px 0; font-weight: 600;">${date}</td>
-              </tr>
-              <tr>
-                <td style="padding: 8px 0; color: #b91c1c;">Slot Time:</td>
-                <td style="padding: 8px 0; font-weight: 600;">${slotTime}</td>
-              </tr>
-            </table>
-          </div>
+    const content = `
+      <h2 style="margin-top: 0; color: #b91c1c; font-size: 24px; font-weight: 700;">Appointment Cancelled ❌</h2>
+      <p style="font-size: 16px; color: #4b5563; line-height: 1.6;">Hi <strong>${patientName}</strong>, the appointment scheduled with <strong>${doctorName}</strong> has been cancelled by the <strong>${cancelledBy.toLowerCase()}</strong>.</p>
+      
+      <div style="margin: 24px 0; padding: 24px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px;">
+        <p style="margin: 0; font-size: 12px; text-transform: uppercase; color: #64748b; font-weight: 700; letter-spacing: 0.1em;">Cancelled Appointment Details</p>
+        <p style="margin: 8px 0 0; font-size: 15px; color: #1e293b;"><strong>Date:</strong> ${date}</p>
+        <p style="margin: 4px 0 0; font-size: 15px; color: #1e293b;"><strong>Time:</strong> ${slotTime}</p>
+      </div>
 
-          <p style="font-size: 14px; color: #6b7280;">If you think this was a mistake, please contact support or attempt to re-book the appointment if the slot is still available.</p>
-          
-          <p style="margin-top: 30px; border-top: 1px solid #e5e7eb; padding-top: 20px;">
-            Best Regards,<br/>
-            <strong>Team Schedula</strong>
-          </p>
-        </div>
-      `,
-    });
+      <div style="margin: 32px 0; padding: 20px; background-color: #fef2f2; border-radius: 12px; border: 1px solid #fecaca; text-align: center;">
+        <p style="margin: 0; color: #991b1b; font-size: 15px; font-weight: 500;">Need to reschedule? You can book a new slot anytime through our app.</p>
+      </div>
+
+      <div style="text-align: center;">
+        <a href="#" style="background-color: ${this.primaryColor}; color: #ffffff; padding: 14px 32px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 16px; box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.2);">Browse Doctors</a>
+      </div>
+    `;
+
+    await this.sendBrevoEmail(data.to, 'Appointment Cancelled - Schedula', this.wrapLayout('Appointment Cancellation', content));
   }
 
   async sendAppointmentReschedule(data: {
@@ -234,59 +240,54 @@ export class EmailService {
     token: number;
     rescheduledBy: 'Patient' | 'Doctor';
   }): Promise<void> {
-    const from = process.env.EMAIL_FROM || process.env.EMAIL_USER || 'noreply@schedula.com';
+    const { patientName, doctorName, oldDate, oldSlotTime, newDate, newDay, newSlotTime, newReportingTime, token } = data;
 
-    if (!this.transporter) {
-      console.warn('[Email] SMTP not configured. Reschedule notice for:', data.to);
-      return;
-    }
-
-    const { patientName, doctorName, oldDate, oldSlotTime, newDate, newDay, newSlotTime, newReportingTime, token, rescheduledBy } = data;
-
-    await this.transporter.sendMail({
-      from,
-      to: data.to,
-      subject: '🔄 Appointment Rescheduled - Schedula',
-      html: `
-        <div style="font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #1f2937; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #2563eb; border-radius: 12px;">
-          <h2 style="color: #2563eb; margin-top: 0;">Appointment Rescheduled 🔄</h2>
-          <p>Hello,</p>
-          <p>The appointment between <strong>${patientName}</strong> and <strong>${doctorName}</strong> has been rescheduled by the <strong>${rescheduledBy}</strong>.</p>
-          
-          <div style="background-color: #f0f7ff; padding: 20px; border-radius: 8px; margin: 20px 0; border: 1px solid #dbeafe;">
-            <h3 style="margin-top: 0; font-size: 16px; color: #1e40af; border-bottom: 1px solid #dbeafe; padding-bottom: 10px;">📅 New Appointment Details</h3>
-            <table style="width: 100%; border-collapse: collapse;">
-              <tr>
-                <td style="padding: 8px 0; color: #1e40af; width: 140px;">New Date:</td>
-                <td style="padding: 8px 0; font-weight: 600;">${newDay}, ${newDate}</td>
-              </tr>
-              <tr>
-                <td style="padding: 8px 0; color: #1e40af;">New Slot Time:</td>
-                <td style="padding: 8px 0; font-weight: 600;">${newSlotTime}</td>
-              </tr>
-              <tr>
-                <td style="padding: 8px 0; color: #1e40af;">New Token:</td>
-                <td style="padding: 8px 0; font-weight: 600; color: #2563eb; font-size: 18px;">#${token}</td>
-              </tr>
-              <tr>
-                <td style="padding: 8px 0; color: #1e40af;">New Reporting Time:</td>
-                <td style="padding: 8px 0; font-weight: 600;">${newReportingTime}</td>
-              </tr>
-            </table>
-          </div>
-
-          <div style="font-size: 13px; color: #6b7280; margin-bottom: 20px;">
-            <p><strong>Previous Details (Cancelled):</strong> ${oldDate} at ${oldSlotTime}</p>
-          </div>
-
-          <p style="font-size: 14px; color: #6b7280;">Please arrive at the clinic at least 10 minutes before your new reporting time.</p>
-          
-          <p style="margin-top: 30px; border-top: 1px solid #e5e7eb; padding-top: 20px;">
-            Best Regards,<br/>
-            <strong>Team Schedula</strong>
-          </p>
+    const content = `
+      <h2 style="margin-top: 0; color: #1e40af; font-size: 24px; font-weight: 700;">Appointment Rescheduled 🔄</h2>
+      <p style="font-size: 16px; color: #4b5563; line-height: 1.6;">Hi <strong>${patientName}</strong>, your visit with <strong>${doctorName}</strong> has been rescheduled. Here is your updated appointment card:</p>
+      
+      <div style="margin: 24px 0; background-color: #f0f7ff; border-radius: 20px; overflow: hidden; border: 1px solid #dbeafe;">
+        <div style="padding: 20px; background-color: #dbeafe;">
+           <p style="margin: 0; font-size: 11px; text-transform: uppercase; color: #1e40af; font-weight: 800; letter-spacing: 0.1em;">Previous Slot</p>
+           <p style="margin: 4px 0 0; font-size: 14px; color: #1e40af; opacity: 0.8;">${oldDate} @ ${oldSlotTime}</p>
         </div>
-      `,
-    });
+        <div style="padding: 32px;">
+          <table width="100%" border="0" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="padding-bottom: 24px;">
+                <p style="margin: 0; font-size: 12px; text-transform: uppercase; color: #64748b; font-weight: 700; letter-spacing: 0.1em;">New Date & Time</p>
+                <p style="margin: 4px 0 0; font-size: 18px; color: #1e293b; font-weight: 700;">${newDay}, ${newDate} @ ${newSlotTime}</p>
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <table width="100%" border="0" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td width="55%">
+                      <p style="margin: 0; font-size: 12px; text-transform: uppercase; color: #64748b; font-weight: 700; letter-spacing: 0.1em;">New Reporting Time</p>
+                      <p style="margin: 4px 0 0; font-size: 18px; color: #1e293b; font-weight: 700;">${newReportingTime}</p>
+                    </td>
+                    <td width="45%" style="text-align: right;">
+                      <div style="display: inline-block; background-color: #2563eb; color: #ffffff; padding: 10px 20px; border-radius: 12px;">
+                        <p style="margin: 0; font-size: 10px; text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em; opacity: 0.9;">Token</p>
+                        <p style="margin: 0; font-size: 24px; font-weight: 800;">#${token}</p>
+                      </div>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+        </div>
+      </div>
+
+      <p style="font-size: 14px; color: #6b7280; font-style: italic; text-align: center;">Please update your schedule. We look forward to seeing you at the clinic!</p>
+      
+      <div style="margin-top: 32px; text-align: center;">
+        <a href="#" style="background-color: ${this.primaryColor}; color: #ffffff; padding: 14px 32px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 16px;">View updated details</a>
+      </div>
+    `;
+
+    await this.sendBrevoEmail(data.to, 'Appointment Rescheduled - Schedula', this.wrapLayout('Appointment Rescheduled', content));
   }
 }

@@ -94,7 +94,10 @@ export class AuthService {
       });
 
       const verificationLink = `${getApiBaseUrl()}/api/v1/auth/verify-email?token=${token}`;
-      await this.emailService.sendWelcomeVerificationEmail(user.email, verificationLink);
+      
+      // Send verification email in the background
+      this.emailService.sendWelcomeVerificationEmail(user.email, verificationLink)
+        .catch(err => console.error('[AuthService] Background email failed:', err.message));
 
       const tokens = await this.generateTokens(user);
 
