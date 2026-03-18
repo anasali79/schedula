@@ -290,4 +290,38 @@ export class EmailService {
 
     await this.sendBrevoEmail(data.to, 'Appointment Rescheduled - Schedula', this.wrapLayout('Appointment Rescheduled', content));
   }
+
+  async sendInformativeEmail(to: string, subject: string, title: string, content: string): Promise<void> {
+    await this.sendBrevoEmail(to, subject, this.wrapLayout(title, content));
+  }
+
+  async sendAppointmentMovedToQueue(data: {
+    to: string;
+    patientName: string;
+    doctorName: string;
+    date: string;
+    oldSlotTime: string;
+    reason: string;
+  }): Promise<void> {
+    const { patientName, doctorName, date, oldSlotTime, reason } = data;
+
+    const content = `
+      <h2 style="margin-top: 0; color: #9a3412; font-size: 24px; font-weight: 700;">Action Required: Appointment Update ⏳</h2>
+      <p style="font-size: 16px; color: #4b5563; line-height: 1.6;">Hi <strong>${patientName}</strong>, due to a change in <strong>${doctorName}'s</strong> schedule, we are unable to fulfill your original appointment on <strong>${date} at ${oldSlotTime}</strong>.</p>
+      
+      <div style="margin: 24px 0; padding: 24px; background-color: #fff7ed; border: 1px solid #ffedd5; border-radius: 12px;">
+        <p style="margin: 0; font-size: 12px; text-transform: uppercase; color: #9a3412; font-weight: 700; letter-spacing: 0.1em;">Status Update</p>
+        <p style="margin: 8px 0 0; font-size: 15px; color: #7c2d12; font-weight: 600;">Moved to Priority Reschedule Queue</p>
+        <p style="margin: 12px 0 0; font-size: 14px; color: #9a3412; line-height: 1.4;"><strong>Reason:</strong> ${reason}</p>
+      </div>
+
+      <p style="font-size: 15px; color: #4b5563; line-height: 1.6;"><strong>What happens next?</strong> Our team will contact you shortly to find the next best available slot that works for you. You are at the top of our rescheduling list.</p>
+
+      <div style="margin-top: 32px; text-align: center;">
+        <a href="#" style="background-color: #ea580c; color: #ffffff; padding: 14px 32px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 16px; box-shadow: 0 4px 6px -1px rgba(234, 88, 12, 0.2);">Check Availability</a>
+      </div>
+    `;
+
+    await this.sendBrevoEmail(data.to, 'Immediate Action: Appointment Schedule Change - Schedula', this.wrapLayout('Schedule Update', content));
+  }
 }

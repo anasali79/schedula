@@ -68,8 +68,16 @@ export class AppointmentsService {
       throw new BadRequestException('Cannot book appointments for past dates');
     }
 
-    // 1. Get Slot with full availability + doctor info
-    const slot = await this.prisma.availabilitySlot.findUnique({
+    // 1. Get Slot - Could be AvailabilitySlot or ElasticSlot
+    let availability;
+    let doctor;
+    let actualSlotId = slotId;
+    let elasticSlotId = null;
+    let slotStartTime;
+    let slotEndTime;
+    let maxAppt;
+
+    const regSlot = await this.prisma.availabilitySlot.findUnique({
       where: { id: slotId },
       include: {
         availability: {
@@ -86,28 +94,78 @@ export class AppointmentsService {
       },
     });
 
-    if (!slot) {
-      throw new NotFoundException('Slot not found');
+    if (regSlot) {
+      availability = regSlot.availability;
+      doctor = availability.doctor;
+      slotStartTime = regSlot.startTime;
+      slotEndTime = regSlot.endTime;
+      maxAppt = regSlot.maxAppt;
+    } else {
+      const eSlot = await this.prisma.elasticSlot.findUnique({
+        where: { id: slotId },
+        include: {
+          availability: {
+            include: {
+              slots: true, // Needed for finding a fallback slot
+              doctor: {
+                include: {
+                  user: true,
+                  profile: true,
+                  specializations: true,
+                },
+              },
+            },
+          },
+          doctor: {
+            include: {
+              user: true,
+              profile: true,
+              specializations: true,
+            },
+          },
+        },
+      });
+
+      if (!eSlot) {
+        throw new NotFoundException('Slot not found');
+      }
+
+      elasticSlotId = eSlot.id;
+      doctor = eSlot.doctor;
+      availability = eSlot.availability;
+      slotStartTime = eSlot.startTime;
+      slotEndTime = eSlot.endTime;
+      maxAppt = eSlot.maxPerSlot;
+
+      // Appointment table requires a slotId (AvailabilitySlot)
+      // If we are booking an elastic slot, we'll link it to a generic slot if available, 
+      // or we must have at least one slot in that availability
+      if (availability && availability.slots && availability.slots.length > 0) {
+        actualSlotId = availability.slots[0].id;
+      } else {
+        // Fallback: search for any slot of this doctor to satisfy the foreign key if availability is null
+        const anySlot = await this.prisma.availabilitySlot.findFirst({
+           where: { availability: { doctorId: doctor.id } }
+        });
+        if (!anySlot) throw new BadRequestException('No base availability slot found for this doctor to link the appointment.');
+        actualSlotId = anySlot.id;
+      }
     }
 
-    const availability = slot.availability;
-    const doctor = availability.doctor;
     const doctorId = doctor.id;
 
     // 2. Validate: appointmentDate must match the slot's availability date
-    if (availability.date) {
-      // Slot belongs to a real date record — appointmentDate must match
+    if (availability && availability.date) {
       const slotDate = availability.date.toISOString().split('T')[0];
       const requestedDate = bookingDate.toISOString().split('T')[0];
       if (slotDate !== requestedDate) {
         throw new BadRequestException(
-          `This slot is for ${slotDate}, but you requested ${requestedDate}. Please use the correct date.`
+          `This slot is for ${slotDate}, but you requested ${requestedDate}.`
         );
       }
-    } else {
-      // Slot belongs to a recurring template — verify the day of week matches
+    } else if (availability && availability.dayOfWeek !== null) {
       const requestedDayOfWeek = bookingDate.getUTCDay();
-      if (availability.dayOfWeek !== null && availability.dayOfWeek !== requestedDayOfWeek) {
+      if (availability.dayOfWeek !== requestedDayOfWeek) {
         const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
         throw new BadRequestException(
           `This slot is for ${DAY_NAMES[availability.dayOfWeek]}, but ${appointmentDate} is a ${DAY_NAMES[requestedDayOfWeek]}.`
@@ -123,7 +181,10 @@ export class AppointmentsService {
 
     const bookedCount = await this.prisma.appointment.count({
       where: {
-        slotId: slot.id,
+        OR: [
+          { slotId: slotId }, // For regular slots
+          { elasticSlotId: slotId } // For elastic slots
+        ],
         appointmentDate: {
           gte: startOfDay,
           lte: endOfDay,
@@ -132,9 +193,9 @@ export class AppointmentsService {
       },
     });
 
-    if (bookedCount >= slot.maxAppt) {
+    if (bookedCount >= maxAppt) {
       throw new BadRequestException(
-        `This slot is fully booked (${slot.maxAppt}/${slot.maxAppt}). Please choose another slot.`
+        `This slot is fully booked (${bookedCount}/${maxAppt}).`
       );
     }
 
@@ -142,18 +203,17 @@ export class AppointmentsService {
     const existingAppointment = await this.prisma.appointment.findFirst({
       where: {
         patientId: patient.id,
-        slotId: slot.id,
         appointmentDate: startOfDay,
+        status: { in: [AppointmentStatus.CONFIRMED] },
+        OR: [
+            { slotId: slotId },
+            { elasticSlotId: slotId }
+        ]
       },
     });
 
     if (existingAppointment) {
-      if (existingAppointment.status === AppointmentStatus.CANCELLED) {
-        throw new BadRequestException(
-          'You have a cancelled appointment for this slot. Please choose another slot or contact support to reactivate.'
-        );
-      }
-      throw new BadRequestException('You have already booked an appointment for this slot.');
+      throw new BadRequestException('You already have a confirmed appointment for this slot.');
     }
 
     // 5. Generate Token
@@ -164,7 +224,8 @@ export class AppointmentsService {
       data: {
         patientId: patient.id,
         doctorId,
-        slotId,
+        slotId: actualSlotId,
+        elasticSlotId: elasticSlotId,
         appointmentDate: startOfDay,
         notes,
         status: AppointmentStatus.CONFIRMED,
@@ -174,15 +235,12 @@ export class AppointmentsService {
     // 7. Build response
     const doctorName = `Dr. ${doctor.firstName}${doctor.lastName ? ' ' + doctor.lastName : ''}`;
     const patientName = `${patient.firstName}${patient.lastName ? ' ' + patient.lastName : ''}`;
-    const slotDisplay = `${this.to12Hour(slot.startTime)} to ${this.to12Hour(slot.endTime)}`;
+    const slotDisplay = `${this.to12Hour(slotStartTime)} to ${this.to12Hour(slotEndTime)}`;
     const dateDisplay = bookingDate.toISOString().split('T')[0]; // YYYY-MM-DD
     const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const dayName = DAY_NAMES[bookingDate.getUTCDay()];
 
-    const isWave = availability.scheduleType === 'WAVE';
-    const reportingTime = isWave
-      ? this.calculateReportingTime(slot.startTime, slot.endTime, slot.maxAppt, tokenNumber)
-      : this.to12Hour(slot.startTime);
+    const reportingTime = this.calculateReportingTime(slotStartTime, slotEndTime, maxAppt, tokenNumber);
 
     // 8. Send Email Notification
     try {
@@ -208,7 +266,7 @@ export class AppointmentsService {
         id: appointment.id,
         date: dateDisplay,
         reportingTime,
-        ...(isWave && { slotTime: `${this.to12Hour(slot.startTime)} to ${this.to12Hour(slot.endTime)}` }),
+        ...(availability?.scheduleType === 'WAVE' && { slotTime: `${this.to12Hour(slotStartTime)} to ${this.to12Hour(slotEndTime)}` }),
         token: tokenNumber,
         doctorName,
         status: appointment.status,
@@ -239,7 +297,10 @@ export class AppointmentsService {
         orderBy: { appointmentDate: 'desc' },
       });
 
-      const upcoming = appointments.filter(a => a.status === AppointmentStatus.CONFIRMED && !a.isRescheduled && new Date(a.appointmentDate) >= new Date());
+      const todayStart = new Date();
+      todayStart.setUTCHours(0, 0, 0, 0);
+
+      const upcoming = appointments.filter(a => a.status === AppointmentStatus.CONFIRMED && !a.isRescheduled && new Date(a.appointmentDate) >= todayStart);
       const rescheduled = appointments.filter(a => a.isRescheduled && a.status === AppointmentStatus.CONFIRMED);
       const completed = appointments.filter(a => a.status === AppointmentStatus.COMPLETED);
       const cancelled = appointments.filter(a => a.status === AppointmentStatus.CANCELLED);
@@ -278,7 +339,10 @@ export class AppointmentsService {
         orderBy: { appointmentDate: 'desc' },
       });
 
-      const upcoming = appointments.filter(a => a.status === AppointmentStatus.CONFIRMED && !a.isRescheduled && new Date(a.appointmentDate) >= new Date());
+      const todayStart = new Date();
+      todayStart.setUTCHours(0, 0, 0, 0);
+
+      const upcoming = appointments.filter(a => a.status === AppointmentStatus.CONFIRMED && !a.isRescheduled && new Date(a.appointmentDate) >= todayStart);
       const rescheduled = appointments.filter(a => a.isRescheduled && a.status === AppointmentStatus.CONFIRMED);
       const completed = appointments.filter(a => a.status === AppointmentStatus.COMPLETED);
       const cancelled = appointments.filter(a => a.status === AppointmentStatus.CANCELLED);
@@ -472,31 +536,65 @@ export class AppointmentsService {
       throw new BadRequestException('Cannot reschedule to a past date');
     }
 
-    // 1. Get New Slot info
-    const newSlot = await this.prisma.availabilitySlot.findUnique({
+    // 1. Get New Slot info - Could be AvailabilitySlot or ElasticSlot
+    let availability;
+    let actualSlotId = slotId;
+    let elasticSlotId = null;
+    let slotStartTime;
+    let slotEndTime;
+    let maxAppt;
+
+    const regSlot = await this.prisma.availabilitySlot.findUnique({
       where: { id: slotId },
       include: { availability: true },
     });
 
-    if (!newSlot) {
-      throw new NotFoundException('New slot not found');
+    if (regSlot) {
+      availability = regSlot.availability;
+      slotStartTime = regSlot.startTime;
+      slotEndTime = regSlot.endTime;
+      maxAppt = regSlot.maxAppt;
+    } else {
+      const eSlot = await this.prisma.elasticSlot.findUnique({
+        where: { id: slotId },
+        include: { availability: { include: { slots: true } } },
+      });
+
+      if (!eSlot) {
+        throw new NotFoundException('New slot not found');
+      }
+
+      elasticSlotId = eSlot.id;
+      availability = eSlot.availability;
+      slotStartTime = eSlot.startTime;
+      slotEndTime = eSlot.endTime;
+      maxAppt = eSlot.maxPerSlot;
+
+      if (availability && availability.slots && availability.slots.length > 0) {
+        actualSlotId = availability.slots[0].id;
+      } else {
+        const anySlot = await this.prisma.availabilitySlot.findFirst({
+           where: { availability: { doctorId: appointment.doctorId } }
+        });
+        if (!anySlot) throw new BadRequestException('No base availability slot found to link the appointment.');
+        actualSlotId = anySlot.id;
+      }
     }
 
-    if (newSlot.availability.doctorId !== appointment.doctorId) {
+    if (availability && availability.doctorId !== appointment.doctorId) {
       throw new BadRequestException('Cannot reschedule to a different doctor');
     }
 
     // 2. Validate date matches slot
-    const availability = newSlot.availability;
-    if (availability.date) {
+    if (availability && availability.date) {
       const slotDate = availability.date.toISOString().split('T')[0];
       const requestedDate = bookingDate.toISOString().split('T')[0];
       if (slotDate !== requestedDate) {
         throw new BadRequestException(`This slot is for ${slotDate}, but you requested ${requestedDate}.`);
       }
-    } else {
+    } else if (availability && availability.dayOfWeek !== null) {
       const requestedDayOfWeek = bookingDate.getUTCDay();
-      if (availability.dayOfWeek !== null && availability.dayOfWeek !== requestedDayOfWeek) {
+      if (availability.dayOfWeek !== requestedDayOfWeek) {
         const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
         throw new BadRequestException(`This slot is for ${DAY_NAMES[availability.dayOfWeek]}, but ${appointmentDate} is a ${DAY_NAMES[requestedDayOfWeek]}.`);
       }
@@ -510,24 +608,30 @@ export class AppointmentsService {
 
     const bookedCount = await this.prisma.appointment.count({
       where: {
-        slotId: newSlot.id,
+        OR: [
+            { slotId: slotId },
+            { elasticSlotId: slotId }
+        ],
         appointmentDate: { gte: startOfDay, lte: endOfDay },
         status: { in: [AppointmentStatus.CONFIRMED] },
       },
     });
 
-    if (bookedCount >= newSlot.maxAppt) {
+    if (bookedCount >= maxAppt) {
       throw new BadRequestException(`The new slot is fully booked.`);
     }
 
-    // 4. Check if patient already has an appointment for this slot on this date
+    // 4. Check if patient already has another appointment
     const existingAppointment = await this.prisma.appointment.findFirst({
       where: {
         patientId: appointment.patientId,
-        slotId: newSlot.id,
         appointmentDate: startOfDay,
-        id: { not: appointmentId }, // Exclude current appointment
+        id: { not: appointmentId },
         status: { in: [AppointmentStatus.CONFIRMED] },
+        OR: [
+            { slotId: slotId },
+            { elasticSlotId: slotId }
+        ]
       },
     });
 
@@ -543,23 +647,22 @@ export class AppointmentsService {
     const updated = await this.prisma.appointment.update({
       where: { id: appointmentId },
       data: {
-        slotId: newSlot.id,
+        slotId: actualSlotId,
+        elasticSlotId: elasticSlotId,
         appointmentDate: startOfDay,
         isRescheduled: true,
       },
     });
 
-    // 5. Emails
+    // 6. Emails
     const patientName = `${appointment.patient.firstName}${appointment.patient.lastName ? ' ' + appointment.patient.lastName : ''}`;
     const doctorName = `Dr. ${appointment.doctor.firstName}${appointment.doctor.lastName ? ' ' + appointment.doctor.lastName : ''}`;
     const newDateStr = bookingDate.toISOString().split('T')[0];
     const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const newDayName = DAY_NAMES[bookingDate.getUTCDay()];
-    const newSlotTime = `${this.to12Hour(newSlot.startTime)} to ${this.to12Hour(newSlot.endTime)}`;
+    const newSlotTime = `${this.to12Hour(slotStartTime)} to ${this.to12Hour(slotEndTime)}`;
     
-    const newReportingTime = availability.scheduleType === 'WAVE'
-      ? this.calculateReportingTime(newSlot.startTime, newSlot.endTime, newSlot.maxAppt, newTokenNumber)
-      : this.to12Hour(newSlot.startTime);
+    const newReportingTime = this.calculateReportingTime(slotStartTime, slotEndTime, maxAppt, newTokenNumber);
 
     const emailData = {
       patientName,
