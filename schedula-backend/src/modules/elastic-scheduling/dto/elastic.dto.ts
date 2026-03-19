@@ -22,6 +22,13 @@ export class ExpandSessionDto {
   @IsOptional()
   @Min(1)
   newMaxPerSlot?: number;
+
+  @IsString()
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'sessionDate must be in YYYY-MM-DD format',
+  })
+  sessionDate?: string;
 }
 
 export class ShrinkSessionDto {
@@ -41,4 +48,11 @@ export class ShrinkSessionDto {
     message: 'newEndTime must be in HH:mm format',
   })
   newEndTime?: string;
+
+  @IsString()
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'sessionDate must be in YYYY-MM-DD format',
+  })
+  sessionDate?: string;
 }
